@@ -19,6 +19,10 @@ const MOD_STATUS = {
 };
 const SIG_STATUS = { alert: ['Alert', C.high], watch: ['Watch', C.mid], clear: ['Clear', C.low], 'n/a': ['N/A', C.faint] };
 const SIG_ORDER = { alert: 0, watch: 1, clear: 2, 'n/a': 3 };
+const GROUPS = [
+  ['synthesis', 'Deepfake synthesis', 'Is the face / voice itself generated?'],
+  ['liveness', 'Liveness', 'Is a live person in front of the camera?'],
+];
 const TARGET_FPS = 15;
 const MAX_WIDTH = 1920;
 const TIMELINE_SPAN_S = 90;
@@ -229,8 +233,8 @@ function clearSession() {
     el.querySelector('.stream-find').textContent = '—';
     el.querySelector('.bar span').style.width = '0%';
   });
-  ['#tv-blink', '#tv-audio', '#tv-pulse', '#tv-sync'].forEach((id) => { $(id).textContent = '—'; });
-  ['#tc-blink', '#tc-pulse', '#tc-sync'].forEach((id) => setupCanvas($(id)));
+  ['#tv-model', '#tv-blink', '#tv-audio', '#tv-pulse', '#tv-sync'].forEach((id) => { $(id).textContent = '—'; });
+  ['#tc-model', '#tc-blink', '#tc-pulse', '#tc-sync'].forEach((id) => setupCanvas($(id)));
 }
 
 function setPhase(p) {
@@ -347,6 +351,12 @@ function renderStats(st) {
   $('#pill-fps').textContent = `${s.fps ? s.fps.toFixed(0) : '—'} fps`;
   $('#kpi-fps').textContent = s.fps ? `${s.fps.toFixed(0)} fps` : '—';
   $('#kpi-lat').textContent = s.proc_ms != null ? `${Math.round(s.proc_ms)} ms` : '—';
+  const m = s.models || {};
+  const states = [m.face, m.voice].map((v) => String(v || ''));
+  const ready = states.filter((v) => v === 'ready').length;
+  const state = ready === 2 ? 'on' : states.some((v) => v === 'loading' || v === 'not loaded') ? 'warn' : 'off';
+  setPill('#pill-ai', state, ready === 2 ? 'AI models' : state === 'warn' ? 'AI loading' : `AI ${ready}/2`);
+  $('#pill-ai').title = `Face detector: ${m.face || '—'}\nVoice detector: ${m.voice || '—'}`;
 }
 
 // =====================================================================
@@ -380,8 +390,16 @@ function renderStreams(mods) {
 function renderSignals(fresh = false) {
   const box = $('#signals');
   const mod = S.last?.modules?.[S.tab];
-  const sigs = (mod?.signals || []).slice()
+  const sorted = (mod?.signals || []).slice()
     .sort((a, b) => SIG_ORDER[a.status] - SIG_ORDER[b.status] || b.risk * b.weight - a.risk * a.weight);
+  const groups = mod?.details?.groups || {};
+  const sigs = [];
+  for (const [g, label, hint] of GROUPS) {
+    const members = sorted.filter((s) => (s.group || 'liveness') === g);
+    if (!members.length) continue;
+    if (S.tab !== 'sync') sigs.push({ key: `hdr-${g}`, header: true, label, hint, score: groups[g]?.score, driver: groups.driver === g });
+    sigs.push(...members);
+  }
   if (fresh || !sigs.length) box.innerHTML = '';
   if (!sigs.length) {
     const msg = { face: 'Checks appear once the customer\'s face is locked.', voice: 'Checks appear once the customer speaks.',
@@ -390,9 +408,25 @@ function renderSignals(fresh = false) {
     return;
   }
   box.querySelector('.sig-empty')?.remove();
-  const existing = new Map($$('.sig', box).map((el) => [el.dataset.key, el]));
+  const existing = new Map($$('.sig, .sig-group', box).map((el) => [el.dataset.key, el]));
   sigs.forEach((s, i) => {
     let el = existing.get(s.key);
+    if (s.header) {
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'sig-group';
+        el.dataset.key = s.key;
+        el.innerHTML = '<div><span class="sg-name"></span><span class="sg-hint"></span></div><span class="chip"></span>';
+      }
+      existing.delete(s.key);
+      el.querySelector('.sg-name').textContent = s.label;
+      el.querySelector('.sg-hint').textContent = s.hint;
+      const chip = el.querySelector('.chip');
+      chip.textContent = s.score == null ? 'no evidence' : `${Math.round(s.score)}${s.driver ? ' · drives score' : ''}`;
+      chip.style.setProperty('--c', s.score == null ? C.faint : riskColor(s.score));
+      if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+      return;
+    }
     if (!el) {
       el = document.createElement('div');
       el.className = 'sig';
@@ -544,6 +578,21 @@ function spark(canvas, values, { color, min, max, fill = true, marks = [], hline
 // =====================================================================
 function renderTelemetry(mods) {
   const f = mods.face.details || {};
+  const md = f.model;
+  if (md?.trace?.length > 1) {
+    const col = riskColor(100 * (md.risk ?? md.p));
+    const { ctx, X, Y, W } = spark($('#tc-model'), md.trace, { color: col, x0: -20, x1: 0, min: 0, max: 1, hline: 0.5 });
+    ctx.fillStyle = C.faint;
+    ctx.font = '500 9px "JetBrains Mono", monospace';
+    ctx.fillText('fake', W - 30, Y(0.93));
+    ctx.fillText('real', W - 30, Y(0.04));
+    void X;
+    const per = (md.per_model || []).map((v, i) => `${(md.names || [])[i] || i} ${v.toFixed(2)}`).join(' · ');
+    $('#tv-model').textContent = `fake score ${md.p.toFixed(2)}${per ? ` — ${per}` : ''}`;
+  } else {
+    setupCanvas($('#tc-model'));
+    $('#tv-model').textContent = md?.status === 'loading' ? 'loading…' : String(md?.status || '').startsWith('unavailable') ? 'not installed' : '—';
+  }
   const b = f.blink;
   if (b?.ear?.length) {
     spark($('#tc-blink'), b.ear, { color: C.face, x0: -20, x1: 0, marks: b.events || [], hline: b.close_thr,

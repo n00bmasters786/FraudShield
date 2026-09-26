@@ -34,20 +34,21 @@ Offline:  score_audio(path) -> (score_0_100, reasons, details)
 from __future__ import annotations
 
 import threading
+from collections import deque
 from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy import signal as sps
 from scipy.io import wavfile
 
-try:
-    from .scoring import Signal, aggregate, clip01, ramp
-except ImportError:
-    from scoring import Signal, aggregate, clip01, ramp
+from . import calibration
+from .scoring import Signal, clip01, group_score, ramp
 
 SR = 16000
 HOP = 160          # 10 ms
 WIN = 400          # 25 ms
+MODEL_SEG_S = 6.0  # trained detector window (shorter tails ≥ 2 s are used too)
+MODEL_EVERY_S = 2.0
 
 
 # --------------------------------------------------------------------------
@@ -470,13 +471,69 @@ def analyze(y_native, sr_native, channel: str = "file"):
     return signals, details
 
 
-def score_audio(path: str) -> Tuple[float, List[str], dict]:
+def _voice_model():
+    from .detectors.voice_classifier import VoiceDeepfakeClassifier
+    return VoiceDeepfakeClassifier
+
+
+def speech_segments(y16, speech_mask, seg_s=MODEL_SEG_S, max_n=None, min_s=2.0):
+    """Non-overlapping windows of up to seg_s (newest first, ≥ min_s long) that are ≥ 40 % speech."""
+    n = int(seg_s * SR)
+    out = []
+    end = len(y16)
+    while end >= int(min_s * SR) and (max_n is None or len(out) < max_n):
+        start = max(0, end - n)
+        m = speech_mask[start // HOP: end // HOP] if len(speech_mask) else []
+        if len(m) and np.mean(m) >= 0.4:
+            out.append(y16[start:end])
+        end = start
+    return out
+
+
+def model_signal(probs, status="ready", quality=1.0) -> Tuple[Signal, dict]:
+    """Clip-level signal from the trained detector's per-segment P(fake)."""
+    lab = "AI voice-clone detector"
+    if not len(probs):
+        if str(status).startswith("unavailable"):
+            why = "Trained voice detector not installed — run: python -m tools.download_models"
+        elif status == "loading":
+            why = "Trained voice detector is loading…"
+        else:
+            why = "Waiting for a few seconds of speech for the trained voice detector"
+        return Signal("voice_model", lab, "—", 0.5, 2.0, 0.0, why, group="synthesis"), {"status": status}
+    p = float(np.mean(probs))
+    risk = calibration.risk("voice_model", [p])
+    rel = clip01(len(probs) / 3) * quality
+    # high precision, low recall: on modern commercial TTS it caught 3/18 clones with no false alarms,
+    # so a "fake" verdict is strong evidence but a "clear" one is weak
+    if risk < 0.35:
+        rel *= 0.3
+    if risk >= 0.65:
+        msg = f"Trained detector hears synthetic / cloned speech: P(fake) {p:.2f} over {len(probs)} segments"
+    elif risk >= 0.35:
+        msg = f"Trained voice detector is unsure: P(fake) {p:.2f}"
+    else:
+        msg = (f"Trained detector hears no synthesis artifacts: P(fake) {p:.2f} over {len(probs)} segments "
+               f"(it misses many modern voice clones, so this is weak evidence)")
+    return Signal("voice_model", lab, f"P {p:.2f}", risk, 2.0, rel, msg, group="synthesis"), \
+        {"status": status, "p": p, "n": len(probs), "risk": risk}
+
+
+def score_audio(path: str, model: bool = True) -> Tuple[float, List[str], dict]:
     y, sr = load_audio(path)
     signals, details = analyze(y, sr)
-    score, conf, reasons = aggregate(signals)
+    if model and details.get("speech"):
+        clf = _voice_model().get()
+        segs = speech_segments(_resample(y, sr), np.array(details["speech"]), max_n=6)
+        probs = clf.predict(segs) if clf is not None and segs else []
+        s_m, md = model_signal(probs, _voice_model().status)
+        signals.append(s_m)
+        details["model"] = md
+    score, conf, reasons, groups = group_score(signals)
     details["confidence"] = conf
+    details["groups"] = groups
     details["signals"] = [s.to_dict() for s in signals]
-    return score, reasons, details
+    return (50.0 if score is None else score), reasons, details
 
 
 # --------------------------------------------------------------------------
@@ -489,8 +546,9 @@ class VoiceStream:
     from the analysis thread.
     """
 
-    def __init__(self, keep_s: float = 20.0, window_s: float = 12.0):
+    def __init__(self, keep_s: float = 20.0, window_s: float = 12.0, model: bool = True):
         self.keep_s, self.window_s = keep_s, window_s
+        self.use_model = model
         self.lock = threading.Lock()
         self.reset()
 
@@ -501,6 +559,8 @@ class VoiceStream:
             self.pos = self.filled = 0
             self.t_end: Optional[float] = None
             self.received_s = 0.0
+            self.model_hist: deque = deque(maxlen=12)   # (t_end, P(fake))
+            self._last_model_t = -1e9
 
     def push(self, t_end: float, sr: int, pcm: np.ndarray):
         """Append a chunk whose last sample was captured at t_end (seconds)."""
@@ -538,9 +598,24 @@ class VoiceStream:
             idx = (self.pos - n + np.arange(n)) % len(self.buf)
             return self.buf[idx].copy(), self.sr, self.t_end
 
-    def analyze_window(self, y=None, sr=None) -> dict:
+    def _model_check(self, y, sr, det, t_end):
+        """Score the newest 4 s of speech with the trained detector (at most every 2 s)."""
+        cls = _voice_model()
+        clf = cls.get(wait=False)                      # never stall the analysis loop on loading
+        if clf is None and cls.status == "not loaded":
+            cls.warmup_async()
+        if clf is not None and t_end is not None and t_end - self._last_model_t >= MODEL_EVERY_S:
+            segs = speech_segments(_resample(y, sr), np.array(det.get("speech") or []), max_n=1)
+            if segs:
+                self._last_model_t = t_end
+                self.model_hist.append((t_end, float(clf.predict(segs)[0])))
+        recent = [p for t, p in self.model_hist if t_end is None or t >= t_end - self.window_s]
+        quality = clip01((det.get("snr_db", 0) - 8) / 12)
+        return model_signal(recent, cls.status, quality)
+
+    def analyze_window(self, y=None, sr=None, t_end=None) -> dict:
         if y is None:
-            y, sr, _ = self.snapshot(self.window_s)
+            y, sr, t_end = self.snapshot(self.window_s)
         out = {"status": "no_audio", "score": None, "confidence": 0.0, "signals": [], "reasons": [], "details": {}}
         if not sr or len(y) < sr:
             return out
@@ -562,7 +637,12 @@ class VoiceStream:
         if speech_s < 1.5:
             out["status"] = "listening"
             return out
-        score, conf, reasons = aggregate(signals)
+        if self.use_model:
+            s_m, md = self._model_check(y, sr, det, t_end)
+            signals.append(s_m)
+            compact["model"] = md
+        score, conf, reasons, groups = group_score(signals)
+        compact["groups"] = groups
         out.update(status="analyzing", score=score, confidence=conf, reasons=reasons,
                    signals=[s.to_dict() for s in signals])
         return out

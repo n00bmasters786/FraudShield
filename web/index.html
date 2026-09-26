@@ -55,6 +55,7 @@
     <span class="pill" id="pill-engine" data-state="idle"><i class="dot"></i><span>Engine</span></span>
     <span class="pill" id="pill-screen" data-state="idle"><svg><use href="#i-screen"/></svg><span>Screen off</span></span>
     <span class="pill" id="pill-audio" data-state="idle"><svg><use href="#i-audio"/></svg><span>Audio off</span></span>
+    <span class="pill" id="pill-ai" data-state="idle"><svg><use href="#i-bolt"/></svg><span>AI models</span></span>
     <span class="pill mono" id="pill-fps">— fps</span>
     <span class="pill mono" id="pill-timer">00:00</span>
   </div>
@@ -117,13 +118,13 @@
     <div class="modules-intro">
       <div class="mi glass reveal" style="--i:4">
         <div class="mi-head"><span class="icon-sq" style="--c:var(--face)"><svg><use href="#i-face"/></svg></span><h3>Face forensics</h3></div>
-        <p>478-point face mesh tracked on the native screen pixels.</p>
-        <div class="tags"><span>Blink rhythm</span><span>Expression</span><span>3-D parallax</span><span>Landmark flicker</span><span>rPPG pulse</span><span>Swap seam</span><span>Screen moiré</span><span>Second face</span></div>
+        <p>A trained deepfake detector (FaceForensics++ + Celeb-DF) plus a 478-point face mesh on native screen pixels.</p>
+        <div class="tags"><span>AI face-swap detector</span><span>Blink rhythm</span><span>Expression</span><span>3-D parallax</span><span>Landmark flicker</span><span>rPPG pulse</span><span>Swap seam</span><span>Screen moiré</span><span>Second face</span></div>
       </div>
       <div class="mi glass reveal" style="--i:5">
         <div class="mi-head"><span class="icon-sq" style="--c:var(--voice)"><svg><use href="#i-voice"/></svg></span><h3>Voice forensics</h3></div>
-        <p>Signal forensics on the call audio, tuned for conferencing codecs.</p>
-        <div class="tags"><span>Intonation</span><span>Micro-jitter</span><span>Periodicity</span><span>Rhythm</span><span>Speaker replay</span></div>
+        <p>A trained voice-clone detector plus signal forensics tuned for conferencing codecs.</p>
+        <div class="tags"><span>AI clone detector</span><span>Intonation</span><span>Micro-jitter</span><span>Periodicity</span><span>Rhythm</span><span>Speaker replay</span></div>
       </div>
       <div class="mi glass reveal" style="--i:6">
         <div class="mi-head"><span class="icon-sq" style="--c:var(--sync)"><svg><use href="#i-sync"/></svg></span><h3>Lip-sync</h3></div>
@@ -184,6 +185,7 @@
         <article class="card glass tele-card reveal" style="--i:2">
           <header class="card-head"><div class="card-title"><svg><use href="#i-face"/></svg>Live telemetry</div></header>
           <div class="tele-grid">
+            <div class="tele wide"><div class="tele-head"><span>AI detector</span><b class="mono" id="tv-model">—</b></div><canvas id="tc-model"></canvas></div>
             <div class="tele"><div class="tele-head"><span>Eye openness</span><b class="mono" id="tv-blink">—</b></div><canvas id="tc-blink"></canvas></div>
             <div class="tele"><div class="tele-head"><span>Call audio</span><b class="mono" id="tv-audio">—</b></div><canvas id="tc-audio"></canvas></div>
             <div class="tele"><div class="tele-head"><span>Skin pulse (rPPG)</span><b class="mono" id="tv-pulse">—</b></div><canvas id="tc-pulse"></canvas></div>

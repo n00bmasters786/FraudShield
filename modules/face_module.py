@@ -25,6 +25,16 @@ with independent checks, each aimed at a different attack:
                              up-scaled) than the untouched neck skin
   7. Screen recapture        moiré peaks + glare from a phone/monitor held
                              up to the customer's camera
+  8. AI deepfake detector    trained MS-EffGCViT ensemble (FaceForensics++ +
+                             Celeb-DF) on face crops — face swaps and
+                             reenactment that pass every liveness check
+
+Checks 0-3, 5 and 7 are *liveness* evidence (is a live person there?);
+4, 6 and 8 are *synthesis* evidence (is the face generated?). The face score
+is the worse of the two groups — see scoring.group_score. Within synthesis
+the trained detector dominates: on the evaluation sample (tools/evaluate.py)
+the hand-made jitter / seam checks were near chance at telling deepfakes from
+real faces, so they are kept only as minor, non-decisive evidence.
 
 `score_video(path)` runs the same pipeline over a video file (offline tests).
 """
@@ -41,10 +51,8 @@ import cv2
 import numpy as np
 from scipy import signal as sps
 
-try:
-    from .scoring import Signal, aggregate, clip01, ramp
-except ImportError:  # running as a plain script
-    from scoring import Signal, aggregate, clip01, ramp
+from . import calibration
+from .scoring import Signal, clip01, group_score, ramp
 
 try:  # legacy "solutions" API — present in the pinned mediapipe 0.10.14
     import mediapipe as mp
@@ -100,6 +108,7 @@ NEAR_EVERY_S = 1.0       # second-person check around the tracked face
 LOST_AFTER_S = 0.8       # mesh lost this long -> drop the lock and search again
 TEX_EVERY_S = 0.5        # texture checks (blend seam, moiré) cadence
 MESH_INPUT = 480         # crop fed to Face Mesh is resized to this side
+MODEL_EVERY_S = 0.25     # trained detector cadence (4 crops/s)
 
 
 # --------------------------------------------------------------------------
@@ -346,10 +355,22 @@ class FaceStream:
     `mouth_series()` may be called concurrently from another.
     """
 
-    def __init__(self, keep_s: float = KEEP_S):
+    def __init__(self, keep_s: float = KEEP_S, model: Optional[str] = "async"):
+        """model: "async" (live — scored on a background thread), "sync" (offline, every
+        sampled frame scored inline) or None (forensic checks only)."""
         self.keep_s = keep_s
         self.lock = threading.Lock()
         self.records: deque = deque()
+        self.model_recs: deque = deque()          # (t, P(fake) per checkpoint, face px)
+        self.model_mode = model
+        self._scorer = None
+        self._clf = None
+        if model == "async":
+            from .detectors.face_classifier import AsyncFaceScorer
+            self._scorer = AsyncFaceScorer(self._on_model)
+        elif model == "sync":
+            from .detectors.face_classifier import FaceDeepfakeClassifier
+            self._clf = FaceDeepfakeClassifier.get()
         self.roi: Optional[Tuple[float, float, float, float]] = None   # normalised, officer-selected
         self._finder = _ScreenFaceFinder()
         self._mesh = _Mesh() if _FACE_MESH is not None else None
@@ -366,12 +387,31 @@ class FaceStream:
         self._last_scan = -1e9
         self._last_near = -1e9
         self._last_tex = -1e9
+        self._last_model_t = -1e9
         self._n_near = 1
 
     def reset(self):
         with self.lock:
             self.records.clear()
+            self.model_recs.clear()
         self._reset_tracking()
+
+    def _on_model(self, t, probs, meta):
+        with self.lock:
+            self.model_recs.append((t, np.asarray(probs, np.float32), meta["face_px"]))
+            while self.model_recs and self.model_recs[0][0] < t - self.keep_s:
+                self.model_recs.popleft()
+
+    @property
+    def model_names(self):
+        from .detectors.face_classifier import FaceDeepfakeClassifier
+        clf = FaceDeepfakeClassifier._instance
+        return clf.names if clf is not None else None
+
+    @property
+    def model_status(self) -> str:
+        from .detectors.face_classifier import FaceDeepfakeClassifier
+        return "off" if self.model_mode is None else FaceDeepfakeClassifier.status
 
     def set_roi(self, roi):
         roi = tuple(float(v) for v in roi) if roi else None
@@ -382,6 +422,8 @@ class FaceStream:
             self._last_scan = -1e9
 
     def close(self):
+        if self._scorer is not None:
+            self._scorer.close()
         self._finder.close()
         if self._mesh is not None:
             self._mesh.close()
@@ -402,6 +444,7 @@ class FaceStream:
         if why == "switch":
             with self.lock:
                 self.records.clear()     # a different person — start a fresh window
+                self.model_recs.clear()
             self.events.append(("switch", "Switched to a larger face on screen — analysis restarted"))
         else:
             self.events.append(("acquire", "Customer face locked"))
@@ -492,6 +535,7 @@ class FaceStream:
             if t - self._last_tex >= TEX_EVERY_S:
                 self._last_tex = t
                 self._texture(frame, lm, rois, rec)
+            self._score_face(t, frame, lm)
 
         with self.lock:
             self.records.append(rec)
@@ -512,6 +556,25 @@ class FaceStream:
             ov["dots"] = np.round(n[MESH_DOTS], 4).ravel().tolist()
             ov["iod"] = round(rec.iod, 1)
         return ov
+
+    def _score_face(self, t, frame, lm):
+        """Hand a native-resolution face crop to the trained detector."""
+        if self._scorer is None and self._clf is None:
+            return
+        if t - self._last_model_t < MODEL_EVERY_S:
+            return
+        self._last_model_t = t
+        from .detectors.face_classifier import effective_scale, face_crop
+        box = _bbox(lm[:468])
+        crop = face_crop(frame, box)
+        if crop is None:
+            return
+        # pixels of real detail across the face, not its (possibly upscaled) size on screen
+        meta = {"face_px": float(min(box[2], box[3])) * effective_scale(crop)}
+        if self._scorer is not None:
+            self._scorer.submit(t, crop, meta)
+        else:
+            self._on_model(t, self._clf.predict([crop])[0], meta)
 
     @staticmethod
     def _texture(frame, lm, rois, rec):
@@ -645,7 +708,19 @@ class FaceStream:
                                       [r.glare for r in seg if r.glare is not None])
         signals.append(s_rec)
 
-        score, conf, reasons = aggregate(signals)
+        # 8. trained deepfake detector
+        with self.lock:
+            mrecs = [m for m in self.model_recs if m[0] >= ts[0] - 0.5]
+        s_model, md = analyze_model(mrecs, self.model_status, self.model_names)
+        signals.append(s_model)
+
+        for sg in signals:
+            if sg.key in SYNTHESIS_KEYS:
+                sg.group = "synthesis"
+            if sg.key in MINOR_SYNTHESIS:          # evaluated near chance vs. real deepfakes
+                sg.weight *= 0.45
+                sg.decisive = False
+        score, conf, reasons, groups = group_score(signals)
 
         # compact traces for the dashboard (time relative to now, seconds)
         ear = (ear_r + ear_l) / 2
@@ -664,6 +739,9 @@ class FaceStream:
                       "fps": fps_u},
             "geometry": {kk: g.get(kk) for kk in ("jitter", "spikes", "expression", "head_motion", "parallax_ratio")},
             "texture": {**bl, **rc},
+            "model": {**{k: v for k, v in md.items() if k != "frames"},
+                      "trace": [[round(float(t - t_end), 2), round(float(p), 3)] for t, p in md.get("frames", [])]},
+            "groups": groups,
         }
         return {"status": "tracking", "score": score, "confidence": conf,
                 "signals": [s.to_dict() for s in signals], "reasons": reasons, "details": det}
@@ -992,10 +1070,63 @@ def analyze_recapture(moire, glare):
         {"moire": m, "glare": g}
 
 
+SYNTHESIS_KEYS = {"jitter", "blend", "model"}
+MINOR_SYNTHESIS = {"jitter", "blend"}
+
+
+def _conf_aggregate(p):
+    """DeepGuard's clip aggregation: trust a clear fake majority / near-unanimous real, else mean."""
+    p = np.asarray(p, float)
+    fakes = p[p > 0.8]
+    if len(fakes) > len(p) // 2.5:
+        return float(fakes.mean())
+    if np.count_nonzero(p < 0.2) > 0.9 * len(p):
+        return float(p[p < 0.2].mean())
+    return float(p.mean())
+
+
+def analyze_model(results, status="ready", names=None):
+    """results: [(t, P(fake) per checkpoint, face px)] from the trained detector."""
+    lab = "AI deepfake detector"
+    if not results:
+        if status == "off":
+            why = "Trained detector disabled"
+        elif status == "loading":
+            why = "Trained deepfake detector is loading…"
+        elif str(status).startswith("unavailable"):
+            why = "Trained deepfake detector not installed — run: python -m tools.download_models"
+        else:
+            why = "Waiting for face crops for the trained detector"
+        return Signal("model", lab, "—", 0.5, 2.5, 0.0, why, group="synthesis"), {"status": status}
+    P = np.stack([r[1] for r in results])                 # (n, checkpoints)
+    per = [_conf_aggregate(P[:, k]) for k in range(P.shape[1])]   # clip-level P(fake) per checkpoint
+    risk = calibration.risk("face_model", per, names)    # stacked + calibrated → fake score
+    face_px = float(np.median([r[2] for r in results]))
+    # the models were trained on ~100+ px faces; tiny faces are upscaled blur, so trust them less
+    rel = clip01(len(results) / 8) * clip01((face_px - 40) / 60)
+    labels = names or [f"#{i}" for i in range(len(per))]
+    split = ", ".join(f"{labels[i]} {v:.2f}" for i, v in enumerate(per))
+    if risk >= 0.65:
+        msg = (f"Trained deepfake detector flags this face: fake score {risk:.2f} over {len(results)} frames "
+               f"({split}) — face-swap / reenactment artifacts")
+    elif risk >= 0.35:
+        msg = f"Trained detector is unsure: fake score {risk:.2f} ({split})"
+    else:
+        msg = f"Trained detector sees a natural face: fake score {risk:.2f} over {len(results)} frames ({split})"
+    if face_px < 80:
+        msg += (f" — the face carries only ~{face_px:.0f} px of real detail (small tile or low-bandwidth call); "
+                f"ask the customer to move closer or improve their connection for a surer result")
+    return Signal("model", lab, f"{risk:.2f}", risk, 2.5, rel, msg, group="synthesis"), \
+        {"status": status, "p": risk, "per_model": per, "n": len(results), "face_px": face_px, "risk": risk,
+         "names": labels, "frames": [(r[0], calibration.risk("face_model", r[1], names)) for r in results]}
+
+
 # --------------------------------------------------------------------------
 # Offline entry point (video file) — same pipeline as the live stream
 # --------------------------------------------------------------------------
-def score_video(path: str, max_seconds: float = 20.0, target_fps: float = 15.0) -> Tuple[float, List[str], dict]:
+def score_video(path: str, max_seconds: float = 20.0, target_fps: float = 15.0, model: Optional[str] = "sync",
+                degrade=None) -> Tuple[float, List[str], dict]:
+    """model: see FaceStream. degrade: optional fn(frame) -> frame, e.g. to simulate a compressed call."""
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("could not open video")
@@ -1003,7 +1134,7 @@ def score_video(path: str, max_seconds: float = 20.0, target_fps: float = 15.0) 
     if not np.isfinite(src_fps) or src_fps < 2 or src_fps > 240:
         src_fps = 30.0
     step = max(1, int(round(src_fps / target_fps)))
-    fs = FaceStream(keep_s=max_seconds + 5)
+    fs = FaceStream(keep_s=max_seconds + 5, model=model)
     i = 0
     try:
         while i < max_seconds * src_fps:
@@ -1011,7 +1142,7 @@ def score_video(path: str, max_seconds: float = 20.0, target_fps: float = 15.0) 
             if not ok:
                 break
             if i % step == 0:
-                fs.process(i / src_fps, frame)
+                fs.process(i / src_fps, degrade(frame) if degrade else frame)
             i += 1
         res = fs.analyze_window(window_s=max_seconds)
     finally:

@@ -25,6 +25,8 @@ from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketDisconnect
 
+from modules.detectors.face_classifier import FaceDeepfakeClassifier
+from modules.detectors.voice_classifier import VoiceDeepfakeClassifier
 from modules.live import LiveSession
 
 ROOT = Path(__file__).parent
@@ -38,9 +40,16 @@ KIND_FRAME, KIND_AUDIO = 1, 2
 app = FastAPI(title="FraudShield Live")
 
 
+@app.on_event("startup")
+def load_models():
+    # load the trained detectors in the background so the first call doesn't wait
+    FaceDeepfakeClassifier.warmup_async()
+    VoiceDeepfakeClassifier.warmup_async()
+
+
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "face_model": FaceDeepfakeClassifier.status, "voice_model": VoiceDeepfakeClassifier.status}
 
 
 @app.websocket("/ws")

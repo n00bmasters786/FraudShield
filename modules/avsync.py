@@ -19,12 +19,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import signal as sps
 
-try:
-    from .scoring import Signal, aggregate, clip01, ramp
-    from .voice_module import _resample, _vad, SR
-except ImportError:
-    from scoring import Signal, aggregate, clip01, ramp
-    from voice_module import _resample, _vad, SR
+from .scoring import Signal, aggregate, clip01, ramp
+from .voice_module import _resample, _vad, SR
 
 GRID_DT = 0.04          # 25 Hz common clock
 MAX_LAG_S = 0.4

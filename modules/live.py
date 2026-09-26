@@ -20,6 +20,8 @@ import cv2
 import numpy as np
 
 from .avsync import analyze_sync
+from .detectors.face_classifier import FaceDeepfakeClassifier
+from .detectors.voice_classifier import VoiceDeepfakeClassifier
 from .face_module import FaceStream
 from .fusion import LiveFusion, Reading, fuse
 from .voice_module import VoiceStream
@@ -160,7 +162,7 @@ class LiveSession:
             return None
         face = self.face.analyze_window()
         y, sr, a_end = self.voice.snapshot(self.voice.window_s)
-        voice = self.voice.analyze_window(y, sr)
+        voice = self.voice.analyze_window(y, sr, a_end)
         if self.has_audio is False:
             voice["status"] = "no_track"
         mt, mouth = self.face.mouth_series(12.0)
@@ -192,7 +194,8 @@ class LiveSession:
             fps = (len(ft) - 1) / (ft[-1] - ft[0]) if len(ft) > 2 and ft[-1] > ft[0] else 0.0
             stats = {"fps": round(fps, 1), "proc_ms": round(float(np.mean(self.proc_ms)), 1) if self.proc_ms else None,
                      "frames": self.frames, "audio_s": round(self.voice.received_s, 1),
-                     "audio_sr": self.voice.sr}
+                     "audio_sr": self.voice.sr,
+                     "models": {"face": FaceDeepfakeClassifier.status, "voice": VoiceDeepfakeClassifier.status}}
 
         for k, m in mods.items():
             m["finding"] = _top_finding(m)

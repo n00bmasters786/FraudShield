@@ -12,12 +12,19 @@ rules that make it behave like an analyst rather than a plain average:
   * a single strong, reliable red flag from a *decisive* check sets a
     floor (it can't be diluted away by many "looks fine" checks), and
   * several independent red flags compound.
+
+Signals belong to a group. "liveness" checks answer *is a live person in
+front of the camera* (photos, screens, replays); "synthesis" checks answer
+*is the face / voice itself generated*. A deepfake passes liveness — it
+blinks, turns and has a pulse-like texture — so the two groups are scored
+separately and the module takes the worse of the two (`group_score`),
+instead of letting a pile of clear liveness checks average a deepfake away.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -30,6 +37,7 @@ class Signal:
     reliability: float    # 0..1
     message: str          # one-line explanation shown in the reasons panel
     decisive: bool = True # may a single strong reading of this check set a risk floor?
+    group: str = "liveness"   # "liveness" or "synthesis"
     extra: dict = field(default_factory=dict)
 
     @property
@@ -90,3 +98,23 @@ def aggregate(signals: List[Signal]) -> Tuple[float, float, List[str]]:
     )
     reasons = [s.message for s in ordered]
     return round(100.0 * score, 1), round(confidence, 2), reasons
+
+
+def group_score(signals: List[Signal]) -> Tuple[Optional[float], float, List[str], dict]:
+    """Score liveness and synthesis evidence separately; the module score is the worse group.
+
+    Returns (score 0..100 or None if no usable evidence, confidence, reasons, per-group detail).
+    """
+    groups = {}
+    for g in ("liveness", "synthesis"):
+        sig = [s for s in signals if s.group == g]
+        usable = sum(s.weight * s.reliability for s in sig)
+        if sig and usable > 1e-6:
+            sc, conf, _ = aggregate(sig)
+            groups[g] = {"score": sc, "confidence": conf}
+    _, _, reasons = aggregate(signals) if signals else (0, 0, [])
+    if not groups:
+        return None, 0.0, reasons, groups
+    worst = max(groups, key=lambda g: groups[g]["score"])
+    conf = max(groups[worst]["confidence"], max(v["confidence"] for v in groups.values()) * 0.8)
+    return groups[worst]["score"], round(conf, 2), reasons, {**groups, "driver": worst}
