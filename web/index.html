@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FraudShield Live</title>
+  <meta name="description" content="Real-time deepfake detection for video KYC calls.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.5l7.5 3.2v5.4c0 4.8-3.2 8.9-7.5 10.4-4.3-1.5-7.5-5.6-7.5-10.4V5.7z' fill='%238b8cff'/%3E%3Cpath d='M8.5 12l2.4 2.4 4.6-4.8' fill='none' stroke='%2306060a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-phase="landing" data-verdict="idle">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></symbol>
+    <symbol id="i-face" viewBox="0 0 24 24"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M9 10h.01M15 10h.01"/><path d="M9 15c1.7 1.3 4.3 1.3 6 0"/></symbol>
+    <symbol id="i-voice" viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></symbol>
+    <symbol id="i-sync" viewBox="0 0 24 24"><path d="M7 9c1.5 1.6 3.2 2.4 5 2.4S15.5 10.6 17 9"/><path d="M7 15c1.5-1.6 3.2-2.4 5-2.4s3.5.8 5 2.4"/><path d="M2 12h2M20 12h2"/></symbol>
+    <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></symbol>
+    <symbol id="i-speak" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01"/></symbol>
+    <symbol id="i-turn" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/></symbol>
+    <symbol id="i-still" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5M14 10V4a2 2 0 0 0-4 0v6M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15"/></symbol>
+    <symbol id="i-profile" viewBox="0 0 24 24"><path d="M9 21v-3.5c-2.5-.3-4-2-4-4.5V9a6 6 0 0 1 12 0l2 4-2 .5V16a2 2 0 0 1-2 2h-1v3"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-region" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+    <symbol id="i-pip" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="12" y="12" width="7" height="6" rx="1"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19L12 3z"/><path d="M12 10v4M12 17.5h.01"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></symbol>
+  </defs>
+</svg>
+
+<div class="bg" aria-hidden="true">
+  <div class="orb o1"></div><div class="orb o2"></div><div class="orb o3"></div>
+  <div class="grid"></div><div class="vignette"></div>
+</div>
+
+<header class="topbar glass">
+  <div class="brand">
+    <div class="logo"><svg><use href="#i-shield"/></svg></div>
+    <div>
+      <div class="brand-name">FraudShield <span class="live-tag">LIVE</span></div>
+      <div class="brand-sub">Real-time deepfake detection for video KYC</div>
+    </div>
+  </div>
+  <div class="pills">
+    <span class="pill" id="pill-engine" data-state="idle"><i class="dot"></i><span>Engine</span></span>
+    <span class="pill" id="pill-screen" data-state="idle"><svg><use href="#i-screen"/></svg><span>Screen off</span></span>
+    <span class="pill" id="pill-audio" data-state="idle"><svg><use href="#i-audio"/></svg><span>Audio off</span></span>
+    <span class="pill mono" id="pill-fps">— fps</span>
+    <span class="pill mono" id="pill-timer">00:00</span>
+  </div>
+  <div class="actions">
+    <button class="btn ghost live-only" id="btn-hud" title="Float a mini score window over the video call"><svg><use href="#i-pip"/></svg><span>Pop-out HUD</span></button>
+    <button class="btn ghost has-data" id="btn-export" title="Download a JSON evidence report"><svg><use href="#i-download"/></svg><span>Report</span></button>
+    <button class="btn ghost live-only" id="btn-reset" title="Start a new customer session"><svg><use href="#i-reset"/></svg><span>New customer</span></button>
+    <button class="btn danger live-only" id="btn-stop"><svg><use href="#i-stop"/></svg><span>Stop</span></button>
+    <button class="btn primary not-live" id="btn-start"><svg><use href="#i-screen"/></svg><span>Share screen</span></button>
+  </div>
+</header>
+
+<main>
+  <!-- ============================== LANDING ============================== -->
+  <section id="landing" class="landing">
+    <div class="hero glass reveal" style="--i:0">
+      <div class="hero-copy">
+        <div class="eyebrow"><svg><use href="#i-bolt"/></svg>Video KYC · live deepfake defence</div>
+        <h1>Spot a deepfake while the customer is <span class="grad">still on the call.</span></h1>
+        <p>FraudShield watches your screen share of the video KYC call, locks onto the customer's face and listens to their voice — scoring face, voice and lip-sync every second.</p>
+        <div class="cta-row">
+          <button class="btn primary xl" id="btn-start-hero"><svg><use href="#i-screen"/></svg><span>Share screen &amp; start monitoring</span></button>
+        </div>
+        <div class="hint">Chrome or Edge · choose <b>Entire screen</b> · tick <b>Also share system audio</b></div>
+        <div class="warn" id="env-warn" hidden></div>
+      </div>
+      <div class="hero-visual" aria-hidden="true">
+        <div class="scanner">
+          <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+          <svg class="wireface" viewBox="0 0 200 240">
+            <path class="wf" d="M100 18c-42 0-68 30-68 78 0 58 34 110 68 124 34-14 68-66 68-124 0-48-26-78-68-78z"/>
+            <path class="wf" d="M58 96c10-9 26-9 36 0M106 96c10-9 26-9 36 0"/>
+            <ellipse class="wf eye" cx="76" cy="108" rx="13" ry="6"/>
+            <ellipse class="wf eye" cx="124" cy="108" rx="13" ry="6"/>
+            <path class="wf" d="M100 112v34l-10 8h20"/>
+            <path class="wf mouth" d="M80 178c12 8 28 8 40 0"/>
+            <g class="mesh-dots">
+              <circle cx="100" cy="40" r="1.6"/><circle cx="64" cy="60" r="1.6"/><circle cx="136" cy="60" r="1.6"/>
+              <circle cx="48" cy="100" r="1.6"/><circle cx="152" cy="100" r="1.6"/><circle cx="56" cy="146" r="1.6"/>
+              <circle cx="144" cy="146" r="1.6"/><circle cx="76" cy="196" r="1.6"/><circle cx="124" cy="196" r="1.6"/>
+              <circle cx="100" cy="214" r="1.6"/><circle cx="100" cy="146" r="1.6"/><circle cx="84" cy="130" r="1.6"/>
+              <circle cx="116" cy="130" r="1.6"/>
+            </g>
+          </svg>
+          <div class="scan-beam"></div>
+        </div>
+        <div class="float-chip c1"><i style="--c:var(--low)"></i>Blink rate 17/min</div>
+        <div class="float-chip c2"><i style="--c:var(--face)"></i>3-D depth ✓</div>
+        <div class="float-chip c3"><i style="--c:var(--high)"></i>Pulse 72 bpm</div>
+        <div class="float-chip c4"><i style="--c:var(--sync)"></i>Lip-sync r 0.46</div>
+      </div>
+    </div>
+
+    <div class="steps">
+      <div class="step glass reveal" style="--i:1"><span class="n">01</span><h3>Share your screen</h3><p>Pick <b>Entire screen</b> and tick <b>system audio</b> so FraudShield sees and hears the call exactly as you do.</p></div>
+      <div class="step glass reveal" style="--i:2"><span class="n">02</span><h3>Run the KYC call</h3><p>Use any video app. The customer's face is found anywhere on screen — or drag a box around their video tile.</p></div>
+      <div class="step glass reveal" style="--i:3"><span class="n">03</span><h3>Watch the live score</h3><p>Risk updates every second, with the evidence behind it and liveness challenges to ask when in doubt.</p></div>
+    </div>
+
+    <div class="modules-intro">
+      <div class="mi glass reveal" style="--i:4">
+        <div class="mi-head"><span class="icon-sq" style="--c:var(--face)"><svg><use href="#i-face"/></svg></span><h3>Face forensics</h3></div>
+        <p>478-point face mesh tracked on the native screen pixels.</p>
+        <div class="tags"><span>Blink rhythm</span><span>Expression</span><span>3-D parallax</span><span>Landmark flicker</span><span>rPPG pulse</span><span>Swap seam</span><span>Screen moiré</span><span>Second face</span></div>
+      </div>
+      <div class="mi glass reveal" style="--i:5">
+        <div class="mi-head"><span class="icon-sq" style="--c:var(--voice)"><svg><use href="#i-voice"/></svg></span><h3>Voice forensics</h3></div>
+        <p>Signal forensics on the call audio, tuned for conferencing codecs.</p>
+        <div class="tags"><span>Intonation</span><span>Micro-jitter</span><span>Periodicity</span><span>Rhythm</span><span>Speaker replay</span></div>
+      </div>
+      <div class="mi glass reveal" style="--i:6">
+        <div class="mi-head"><span class="icon-sq" style="--c:var(--sync)"><svg><use href="#i-sync"/></svg></span><h3>Lip-sync</h3></div>
+        <p>Do the lips move with the voice? Catches voice-overs, clones and replays.</p>
+        <div class="tags"><span>Cross-correlation</span><span>±400 ms lag</span><span>Static-lips alarm</span></div>
+      </div>
+    </div>
+    <p class="privacy reveal" style="--i:7"><svg><use href="#i-lock"/></svg>Frames and audio are analysed by the engine on this machine and are never stored.</p>
+  </section>
+
+  <!-- ============================== DASHBOARD ============================== -->
+  <section id="dash" class="dash">
+    <div class="col-main">
+      <article class="card glass capture-card reveal" style="--i:0">
+        <header class="card-head">
+          <div class="card-title"><svg><use href="#i-screen"/></svg>Live screen capture</div>
+          <div class="card-tools">
+            <span class="chip" id="target-chip">Scanning</span>
+            <button class="btn tiny" id="btn-region" title="Drag a box around the customer's video tile"><svg><use href="#i-region"/></svg><span>Select region</span></button>
+            <button class="btn tiny" id="btn-auto" hidden title="Go back to automatic face finding"><svg><use href="#i-target"/></svg><span>Auto</span></button>
+          </div>
+        </header>
+        <div class="stage" id="stage" data-face="searching">
+          <video id="preview" muted playsinline autoplay></video>
+          <canvas id="overlay"></canvas>
+          <div class="scanline"></div>
+          <div class="stage-msg" id="stage-msg">Scanning the screen for the customer's face…</div>
+          <div class="select-hint">Drag a box around the customer's video tile · Esc to cancel</div>
+        </div>
+        <footer class="capture-foot">
+          <div class="thumb-wrap"><canvas id="thumb" width="160" height="160"></canvas><span class="thumb-corners"></span></div>
+          <div class="target-info">
+            <div class="ti-title" id="ti-title">No face locked</div>
+            <div class="ti-sub" id="ti-sub">Open the video call on the shared screen. The largest face is locked automatically.</div>
+          </div>
+          <div class="kpis">
+            <div class="kpi"><span class="k">Face size</span><span class="v mono" id="kpi-face">—</span></div>
+            <div class="kpi"><span class="k">Analysed</span><span class="v mono" id="kpi-fps">—</span></div>
+            <div class="kpi"><span class="k">Latency</span><span class="v mono" id="kpi-lat">—</span></div>
+          </div>
+        </footer>
+      </article>
+
+      <article class="card glass timeline-card reveal" style="--i:1">
+        <header class="card-head">
+          <div class="card-title"><svg><use href="#i-bolt"/></svg>Risk timeline</div>
+          <div class="legend" id="legend">
+            <button class="lg on" data-series="1" style="--c:var(--v)">Overall</button>
+            <button class="lg on" data-series="2" style="--c:var(--face)">Face</button>
+            <button class="lg on" data-series="3" style="--c:var(--voice)">Voice</button>
+            <button class="lg on" data-series="4" style="--c:var(--sync)">Lip-sync</button>
+          </div>
+        </header>
+        <div class="timeline-wrap"><canvas id="timeline"></canvas></div>
+      </article>
+
+      <div class="split">
+        <article class="card glass tele-card reveal" style="--i:2">
+          <header class="card-head"><div class="card-title"><svg><use href="#i-face"/></svg>Live telemetry</div></header>
+          <div class="tele-grid">
+            <div class="tele"><div class="tele-head"><span>Eye openness</span><b class="mono" id="tv-blink">—</b></div><canvas id="tc-blink"></canvas></div>
+            <div class="tele"><div class="tele-head"><span>Call audio</span><b class="mono" id="tv-audio">—</b></div><canvas id="tc-audio"></canvas></div>
+            <div class="tele"><div class="tele-head"><span>Skin pulse (rPPG)</span><b class="mono" id="tv-pulse">—</b></div><canvas id="tc-pulse"></canvas></div>
+            <div class="tele"><div class="tele-head"><span>Lip ↔ voice correlation</span><b class="mono" id="tv-sync">—</b></div><canvas id="tc-sync"></canvas></div>
+          </div>
+        </article>
+        <article class="card glass events-card reveal" style="--i:3">
+          <header class="card-head"><div class="card-title"><svg><use href="#i-alert"/></svg>Event log</div><span class="chip subtle" id="ev-count">0</span></header>
+          <ol class="events" id="events"><li class="ev-empty">Events appear here as the call is analysed.</li></ol>
+        </article>
+      </div>
+    </div>
+
+    <aside class="col-side">
+      <article class="card glass score-card reveal" style="--i:1" id="score-card">
+        <div class="score-top">
+          <div class="card-title"><svg><use href="#i-shield"/></svg>Deepfake risk</div>
+          <span class="chip live-chip"><i class="dot"></i><span id="live-label">Live</span></span>
+        </div>
+        <div class="gauge-wrap">
+          <div class="halo"></div>
+          <svg class="gauge" viewBox="0 0 240 200" id="gauge">
+            <defs>
+              <linearGradient id="g-arc" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#34d399"/><stop offset=".5" stop-color="#fbbf24"/><stop offset="1" stop-color="#fb7185"/>
+              </linearGradient>
+              <filter id="g-glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4"/></filter>
+            </defs>
+            <g id="g-ticks"></g>
+            <path class="g-track" id="g-track"/>
+            <path class="g-glow" id="g-glow" filter="url(#g-glow)"/>
+            <path class="g-val" id="g-val"/>
+            <circle class="g-knob" id="g-knob" r="7"/>
+          </svg>
+          <div class="gauge-center">
+            <div class="g-num" id="g-num">—</div>
+            <div class="g-unit">/ 100 risk</div>
+          </div>
+        </div>
+        <div class="verdict">
+          <div class="verdict-label" id="verdict-label">Idle</div>
+          <div class="verdict-action" id="verdict-action">Share your screen to start monitoring the video KYC call.</div>
+        </div>
+        <div class="conf">
+          <div class="conf-head"><span>Evidence confidence</span><b class="mono" id="conf-val">0%</b></div>
+          <div class="bar"><span id="conf-bar"></span></div>
+        </div>
+      </article>
+
+      <article class="card glass streams-card reveal" style="--i:2">
+        <header class="card-head"><div class="card-title"><svg><use href="#i-sync"/></svg>Evidence streams</div></header>
+        <div class="streams">
+          <div class="stream" data-mod="face" style="--c:var(--face)">
+            <div class="mring"><span class="mnum">—</span></div>
+            <div class="stream-body"><div class="stream-name"><svg><use href="#i-face"/></svg>Face<span class="stream-status">Waiting</span></div><div class="stream-find">—</div><div class="bar thin"><span></span></div></div>
+          </div>
+          <div class="stream" data-mod="voice" style="--c:var(--voice)">
+            <div class="mring"><span class="mnum">—</span></div>
+            <div class="stream-body"><div class="stream-name"><svg><use href="#i-voice"/></svg>Voice<span class="stream-status">Waiting</span></div><div class="stream-find">—</div><div class="bar thin"><span></span></div></div>
+          </div>
+          <div class="stream" data-mod="sync" style="--c:var(--sync)">
+            <div class="mring"><span class="mnum">—</span></div>
+            <div class="stream-body"><div class="stream-name"><svg><use href="#i-sync"/></svg>Lip-sync<span class="stream-status">Waiting</span></div><div class="stream-find">—</div><div class="bar thin"><span></span></div></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card glass prompts-card reveal" style="--i:3">
+        <header class="card-head"><div class="card-title"><svg><use href="#i-speak"/></svg>Suggested challenges</div></header>
+        <ul class="prompts" id="prompts"><li class="pr-empty">Nothing to ask right now.</li></ul>
+      </article>
+
+      <article class="card glass signals-card reveal" style="--i:4">
+        <header class="card-head">
+          <div class="card-title"><svg><use href="#i-target"/></svg>Forensic checks</div>
+          <div class="tabs" id="sig-tabs">
+            <span class="tab-ink"></span>
+            <button class="tab on" data-tab="face">Face</button>
+            <button class="tab" data-tab="voice">Voice</button>
+            <button class="tab" data-tab="sync">Lip-sync</button>
+          </div>
+        </header>
+        <div class="signals" id="signals"><div class="sig-empty">Checks appear once the customer's face is locked.</div></div>
+      </article>
+    </aside>
+  </section>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
