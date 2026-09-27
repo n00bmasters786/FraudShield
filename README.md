@@ -32,10 +32,18 @@ venv\Scripts\python -m tools.download_models   # ~430 MB of detector weights int
 venv\Scripts\python app.py                     # opens http://localhost:8000
 ```
 
-With an NVIDIA GPU, install the CUDA build of torch instead
-(`--index-url https://download.pytorch.org/whl/cu124`); the detectors use it
-automatically. If torch or the weights are missing, the app still runs on the
-forensic checks alone, and the dashboard's **AI models** pill says so.
+With an NVIDIA GPU, install the CUDA builds instead; the detectors use the GPU
+automatically. Install torch and torchvision **together from the same index**,
+because a torchvision built for a different torch breaks both detectors
+(`operator torchvision::nms does not exist`):
+
+```bash
+venv\Scripts\pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+```
+
+If torch or the weights are missing, the app still runs on the forensic checks
+alone, and the dashboard's **AI models** pill says so. Hover over the pill to
+see why.
 
 Use **Chrome or Edge**. Screen capture only works on a secure page, so open
 the dashboard as `http://localhost:8000` on the officer's own machine (not
