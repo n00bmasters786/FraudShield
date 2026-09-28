@@ -27,6 +27,7 @@ from .fusion import LiveFusion, Reading, fuse
 from .voice_module import VoiceStream
 
 EVENT_COOLDOWN_S = 20.0
+VOICE_EVERY_S = 2.0        # voice checks summarise 12 s of audio; refreshing them every 2 s is plenty
 SENTENCES = [
     "The name on my ID card is my full legal name",
     "I am opening this account for myself",
@@ -86,6 +87,8 @@ class LiveSession:
         self._sig_status = {}
         self._last_alert = {}
         self._verdict = None
+        self._voice = None
+        self._voice_t = -1e9
         self._face_status = None
         self._voice_status = None
 
@@ -115,13 +118,16 @@ class LiveSession:
             self.t_media = t if self.t_media is None else max(self.t_media, t)
         return t
 
-    def process_frame(self, ts_ms: float, jpeg: bytes) -> dict:
+    def process_frame(self, ts_ms: float, jpeg: bytes, origin=(0, 0), full_size=None) -> dict:
+        """One JPEG from the browser: the whole screen, or a region of it at `origin`
+        within a screen of `full_size` = (W, H)."""
         t = self._clock(ts_ms)
         t_start = time.perf_counter()
         frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             return {"type": "ack", "error": "bad frame"}
-        ov = self.face.process(t, frame)
+        ov = self.face.process(t, frame, origin, full_size)
+        size = list(full_size) if full_size else [frame.shape[1], frame.shape[0]]
         ms = 1000 * (time.perf_counter() - t_start)
         with self.lock:
             self.frames += 1
@@ -130,8 +136,7 @@ class LiveSession:
             for kind, text in self.face.events:
                 self._event("face", "info" if kind == "acquire" else "warn", text)
             self.face.events.clear()
-        return clean({"type": "ack", "t": ts_ms, "proc_ms": round(ms, 1),
-                      "size": [frame.shape[1], frame.shape[0]], **ov})
+        return clean({"type": "ack", "t": ts_ms, "proc_ms": round(ms, 1), "size": size, **ov})
 
     def add_audio(self, ts_ms: float, sr: int, pcm16: bytes):
         t = self._clock(ts_ms)
@@ -162,7 +167,9 @@ class LiveSession:
             return None
         face = self.face.analyze_window()
         y, sr, a_end = self.voice.snapshot(self.voice.window_s)
-        voice = self.voice.analyze_window(y, sr, a_end)
+        if self._voice is None or self.t_media - self._voice_t >= VOICE_EVERY_S:
+            self._voice, self._voice_t = self.voice.analyze_window(y, sr, a_end), self.t_media
+        voice = dict(self._voice)
         if self.has_audio is False:
             voice["status"] = "no_track"
         mt, mouth = self.face.mouth_series(12.0)

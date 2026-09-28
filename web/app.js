@@ -91,7 +91,7 @@ async function start() {
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: 'monitor', frameRate: { ideal: 30, max: 30 } },
+      video: { displaySurface: 'monitor', frameRate: { ideal: 15, max: 15 } },   // the engine analyses ≤ 15 fps
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false },
       systemAudio: 'include',
       selfBrowserSurface: 'exclude',
@@ -222,16 +222,16 @@ function clearSession() {
   $('#ev-count').textContent = '0';
   $('#signals').innerHTML = '<div class="sig-empty">Checks appear once the customer\'s face is locked.</div>';
   $('#prompts').innerHTML = '<li class="pr-empty">Nothing to ask right now.</li>';
-  $('#conf-bar').style.width = '0%';
+  setBar($('#conf-bar'), 0);
   $('#conf-val').textContent = '0%';
   $('#live-label').textContent = 'Live';
   $$('.stream').forEach((el) => {
     el.dataset.risk = '';
-    el.querySelector('.mring').style.setProperty('--p', 0);
+    setRing(el.querySelector('.mring'), 0);
     el.querySelector('.mnum').textContent = '—';
     el.querySelector('.stream-status').textContent = 'Waiting';
     el.querySelector('.stream-find').textContent = '—';
-    el.querySelector('.bar span').style.width = '0%';
+    setBar(el.querySelector('.bar span'), 0);
   });
   ['#tv-model', '#tv-blink', '#tv-audio', '#tv-pulse', '#tv-sync'].forEach((id) => { $(id).textContent = '—'; });
   ['#tc-model', '#tc-blink', '#tc-pulse', '#tc-sync'].forEach((id) => setupCanvas($(id)));
@@ -260,7 +260,7 @@ function onWorker(m) {
       S.hello = m;
       break;
     case 'ack':
-      if (!m.dropped && !m.error) { S.ack = m; S.ackAt = performance.now(); renderTarget(m); }
+      if (!m.dropped && !m.error) { S.ack = m; S.ackAt = performance.now(); S.overlayDirty = true; renderTarget(m); }
       break;
     case 'state':
       if (S.phase === 'live') onState(m);
@@ -282,7 +282,7 @@ function onState(st) {
   setVerdict(ov.verdict, ov.label, ov.action);
   S.gauge.target = ov.score;
   $('#conf-val').textContent = `${Math.round(ov.confidence * 100)}%`;
-  $('#conf-bar').style.width = `${ov.confidence * 100}%`;
+  setBar($('#conf-bar'), ov.confidence * 100);
 
   renderStreams(st.modules);
   renderSignals();
@@ -376,14 +376,14 @@ function renderStreams(mods) {
     const m = mods[k];
     const el = $(`.stream[data-mod="${k}"]`);
     const ring = el.querySelector('.mring');
-    ring.style.setProperty('--p', m.score ?? 0);
+    setRing(ring, m.score);
     ring.style.setProperty('--rc', m.score == null ? 'rgba(255,255,255,0.18)' : riskColor(m.score));
     el.querySelector('.mnum').textContent = m.score == null ? '—' : Math.round(m.score);
     el.dataset.risk = m.score == null ? '' : m.score >= 65 ? 'high' : m.score >= 35 ? 'mid' : 'low';
     const st = MOD_STATUS[k][m.status] || m.status;
     el.querySelector('.stream-status').textContent = m.score != null ? `${st} · ${Math.round(m.confidence * 100)}%` : st;
     el.querySelector('.stream-find').textContent = (m.score != null && m.finding) || waitingText(k, m);
-    el.querySelector('.bar span').style.width = `${(m.confidence || 0) * 100}%`;
+    setBar(el.querySelector('.bar span'), (m.confidence || 0) * 100);
   }
 }
 
@@ -443,7 +443,7 @@ function renderSignals(fresh = false) {
     chip.style.setProperty('--c', col);
     el.querySelector('.sig-name').textContent = s.label;
     el.querySelector('.sig-val').textContent = s.value;
-    el.querySelector('.bar span').style.width = s.status === 'n/a' ? '0%' : `${Math.max(3, s.risk * 100)}%`;
+    setBar(el.querySelector('.bar span'), s.status === 'n/a' ? 0 : Math.max(3, s.risk * 100));
     el.querySelector('.sig-msg').textContent = s.message;
     if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
   });
@@ -478,8 +478,38 @@ function addEvent(ev) {
 // =====================================================================
 // Canvas helpers
 // =====================================================================
+// Bars and rings change every second. Animating a bar's width re-lays out the page on every
+// frame and a ring's conic gradient repaints it, so together they kept the dashboard rendering
+// at 60 fps permanently. Bars scale on the compositor instead, and nothing is touched unless
+// the displayed value actually changes.
+function setBar(el, pct) {
+  const v = Math.round(clamp(pct, 0, 100) * 10) / 10;
+  if (el.dataset.v === String(v)) return;
+  el.dataset.v = String(v);
+  el.style.transform = `scaleX(${v / 100})`;
+}
+
+function setRing(el, value) {
+  const v = Math.round(value ?? 0);
+  if (el.dataset.p === String(v)) return;
+  el.dataset.p = String(v);
+  el.style.setProperty('--p', v);
+}
+
+const canvasSize = new WeakMap();
+const resizeObs = new ResizeObserver((entries) => {
+  for (const e of entries) canvasSize.set(e.target, { width: e.contentRect.width, height: e.contentRect.height });
+  S.overlayDirty = true;
+});
+
 function setupCanvas(c) {
-  const r = c.getBoundingClientRect();
+  let r = canvasSize.get(c);
+  if (!r) {
+    const b = c.getBoundingClientRect();
+    r = { width: b.width, height: b.height };
+    canvasSize.set(c, r);
+    resizeObs.observe(c);
+  }
   const dpr = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * dpr));
   const h = Math.max(1, Math.round(r.height * dpr));
@@ -947,12 +977,18 @@ function buildGauge() {
 
 function tweenGauge(dt) {
   const g = S.gauge;
+  const prev = g.shown;
   if (g.target == null) {
     g.shown = null;
   } else if (g.shown == null) {
     g.shown = 0;
   }
-  if (g.shown != null) g.shown += (g.target - g.shown) * (1 - Math.exp(-dt / 0.45));
+  if (g.shown != null) {
+    g.shown += (g.target - g.shown) * (1 - Math.exp(-dt / 0.45));
+    if (Math.abs(g.target - g.shown) < 0.05) g.shown = g.target;
+  }
+  if (g.shown === prev && g.drawn) return;          // settled: nothing to repaint
+  g.drawn = true;
   const p = g.shown == null ? 0 : clamp(g.shown / 100);
   const off = G.len * (1 - p);
   $('#g-val').style.strokeDashoffset = off;
@@ -971,6 +1007,7 @@ function tweenGauge(dt) {
 function setSelecting(on) {
   S.selecting = on;
   S.drag = null;
+  S.overlayDirty = true;
   $('#stage').classList.toggle('selecting', on);
   $('#btn-region').classList.toggle('on', on);
 }
@@ -987,6 +1024,7 @@ function initRegion() {
   $('#btn-region').addEventListener('click', () => setSelecting(!S.selecting));
   $('#btn-auto').addEventListener('click', () => {
     S.roi = null;
+    S.overlayDirty = true;
     $('#btn-auto').hidden = true;
     sendConfig({ roi: null });
     toast('Back to automatic face finding across the whole screen.');
@@ -1010,6 +1048,7 @@ function initRegion() {
     setSelecting(false);
     if (roi[2] < 0.04 || roi[3] < 0.04) { toast('That region is too small — drag a box around the whole video tile.'); return; }
     S.roi = roi.map((v) => +v.toFixed(4));
+    S.overlayDirty = true;
     $('#btn-auto').hidden = false;
     sendConfig({ roi: S.roi });
     toast('Region locked — only faces inside it are analysed.');
@@ -1085,14 +1124,14 @@ function updateHud() {
   const o = S.last.overall;
   d.body.dataset.verdict = o.verdict;
   const ring = d.getElementById('h-ring');
-  ring.style.setProperty('--p', o.score ?? 0);
+  setRing(ring, o.score);
   ring.style.setProperty('--rc', VERDICT_COLOR[o.verdict] || C.accent);
   d.getElementById('h-num').textContent = o.score == null ? '—' : Math.round(o.score);
   d.getElementById('h-verdict').textContent = o.label;
   d.getElementById('h-action').textContent = o.action;
   for (const k of ['face', 'voice', 'sync']) {
     const m = S.last.modules[k];
-    d.getElementById(`h-${k}`).style.width = `${m.score ?? 0}%`;
+    setBar(d.getElementById(`h-${k}`), m.score ?? 0);
     d.getElementById(`h-${k}-v`).textContent = m.score == null ? '—' : Math.round(m.score);
   }
 }
@@ -1130,18 +1169,39 @@ function exportReport() {
 // =====================================================================
 // Main loop
 // =====================================================================
-let lastFrame = performance.now();
+// Each piece redraws at its own cadence — enough to look smooth, without repainting five
+// canvases 60 times a second while the officer is on a video call.
+const CADENCE_MS = { gauge: 33, timeline: 66, scope: 50, clock: 250 };
+const lastRun = { gauge: 0, timeline: 0, scope: 0, clock: 0 };
+let lastGauge = performance.now();
+let lastClock = '';
+
+function due(key, now) {
+  if (now - lastRun[key] < CADENCE_MS[key]) return false;
+  lastRun[key] = now;
+  return true;
+}
+
 function loop(now) {
   requestAnimationFrame(loop);
-  const dt = Math.min(0.1, (now - lastFrame) / 1000);
-  lastFrame = now;
   if (document.hidden || S.phase === 'landing') return;
-  tweenGauge(dt);
-  drawOverlay();
-  drawThumb();
-  drawTimeline();
-  drawAudioScope();
-  if (S.phase === 'live') $('#pill-timer').textContent = fmtClock((now - S.startedAt) / 1000);
+  if (due('gauge', now)) {
+    tweenGauge(Math.min(0.1, (now - lastGauge) / 1000));
+    lastGauge = now;
+  }
+  // overlay + thumbnail: only when a new tracking result arrived, or while an old one fades out
+  const age = (now - S.ackAt) / 1000;
+  if (S.overlayDirty || S.drag || (age > 0.7 && age < 1.8)) {
+    S.overlayDirty = false;
+    drawOverlay();
+    drawThumb();
+  }
+  if (due('timeline', now)) drawTimeline();
+  if (due('scope', now)) drawAudioScope();
+  if (S.phase === 'live' && due('clock', now)) {
+    const c = fmtClock((now - S.startedAt) / 1000);
+    if (c !== lastClock) { $('#pill-timer').textContent = c; lastClock = c; }
+  }
 }
 
 function init() {

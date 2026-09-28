@@ -15,7 +15,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from . import MODELS_DIR, torch_device
+from . import MODELS_DIR, torch_device, wait_gpu
 
 log = logging.getLogger("fraudshield.voice_model")
 
@@ -56,8 +56,9 @@ class VoiceDeepfakeClassifier:
 
         self.torch = torch
         self.device = torch_device()
-        path = snapshot_download(REPO, local_dir=MODELS_DIR / REPO.split("/")[1],
-                                 allow_patterns=["*.json", "*.safetensors"])
+        path = MODELS_DIR / REPO.split("/")[1]
+        if not (path / "model.safetensors").exists() or not (path / "config.json").exists():
+            path = snapshot_download(REPO, local_dir=path, allow_patterns=["*.json", "*.safetensors"])
         self.fe = Wav2Vec2FeatureExtractor.from_pretrained(path)
         self.model = Wav2Vec2ForSequenceClassification.from_pretrained(path).eval().to(self.device)
         labels = {v.lower(): int(k) for k, v in self.model.config.id2label.items()}
@@ -77,4 +78,6 @@ class VoiceDeepfakeClassifier:
                       return_tensors="pt", padding=True)
         with self._lock, torch.inference_mode():
             logits = self.model(**{k: v.to(self.device) for k, v in inp.items()}).logits
-        return torch.softmax(logits.float(), -1)[:, self.fake_idx].cpu().numpy()
+            p = torch.softmax(logits.float(), -1)[:, self.fake_idx]
+            wait_gpu(torch, self.device)
+            return p.cpu().numpy()

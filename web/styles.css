@@ -331,7 +331,8 @@ body[data-phase="stopped"] .live-chip .dot { animation: none; background: var(--
 .conf-head { display: flex; justify-content: space-between; font-size: .74rem; color: var(--muted); }
 .conf-head b { color: var(--text); font-weight: 500; }
 .bar { height: 6px; border-radius: 99px; background: rgba(255,255,255,.06); overflow: hidden; margin-top: 7px; }
-.bar span { display: block; height: 100%; width: 0; border-radius: inherit; transition: width .9s var(--ease), background .9s;
+.bar span { display: block; height: 100%; width: 100%; border-radius: inherit; transform: scaleX(0); transform-origin: left center;
+  transition: transform .35s var(--ease), background .9s;
   background: linear-gradient(90deg, color-mix(in srgb, var(--v) 45%, transparent), var(--v)); }
 .bar.thin { height: 4px; margin-top: 8px; }
 
@@ -342,7 +343,7 @@ body[data-phase="stopped"] .live-chip .dot { animation: none; background: var(--
 .stream[data-risk="high"] { border-color: color-mix(in srgb, var(--high) 45%, transparent); background: color-mix(in srgb, var(--high) 7%, transparent); }
 .stream[data-risk="mid"] { border-color: color-mix(in srgb, var(--mid) 35%, transparent); }
 .mring { --p: 0; --rc: var(--c); width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; position: relative;
-  background: conic-gradient(var(--rc) calc(var(--p) * 1%), rgba(255,255,255,.07) 0); transition: --p 1s var(--ease), --rc .8s; box-shadow: 0 0 26px -10px var(--rc); }
+  background: conic-gradient(var(--rc) calc(var(--p) * 1%), rgba(255,255,255,.07) 0); transition: --p .3s var(--ease), --rc .6s; box-shadow: 0 0 26px -10px var(--rc); }
 .mring::before { content: ""; position: absolute; inset: 5px; border-radius: 50%; background: radial-gradient(circle at 50% 30%, #17171f, #09090d); }
 .mnum { position: relative; font: 700 1.05rem var(--display); font-variant-numeric: tabular-nums; }
 .stream-body { min-width: 0; }
@@ -407,6 +408,60 @@ body[data-phase="stopped"] .live-chip .dot { animation: none; background: var(--
   .kpis { width: 100%; }
   .kpi { flex: 1; }
 }
+/* ------------------------------------------------------------ performance
+   Same look, much less GPU/CPU while screen sharing. Everything here is either
+   compositor-only (transform / opacity) or static. */
+
+/* backdrop orbs: soft multi-stop gradients instead of a 90 px filter blur, and frozen
+   outside the landing page so nothing behind the glass changes during a session */
+.orb { filter: none; opacity: .6; }
+.o1 { background: radial-gradient(circle, rgba(99,102,241,.36) 0%, rgba(99,102,241,.2) 30%, rgba(99,102,241,.07) 52%, transparent 70%); }
+.o2 { background: radial-gradient(circle, rgba(236,72,153,.2) 0%, rgba(236,72,153,.11) 30%, rgba(236,72,153,.04) 52%, transparent 70%); }
+.o3 { background: radial-gradient(circle, rgba(20,184,166,.2) 0%, rgba(20,184,166,.11) 30%, rgba(20,184,166,.04) 52%, transparent 70%); }
+body:not([data-phase="landing"]) .orb { animation: none; will-change: auto; }
+
+/* frosted glass during a session: the backdrop is now static and already soft, so a real
+   blur of it looks the same as a translucent tint — without re-blurring every frame */
+body:not([data-phase="landing"]) .dash .glass {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: linear-gradient(145deg, rgba(34,34,48,.62), rgba(14,14,20,.7));
+}
+body:not([data-phase="landing"]) .topbar {                 /* sticky: content scrolls under it */
+  --blur: blur(14px);
+}
+.stage-msg { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(8,8,12,.86); }
+
+/* status dots: a steady glow. A looping ripple — however cheap — keeps the whole page
+   re-compositing at 60 fps, over the live screen preview, for the entire call. */
+.pill[data-state="on"] .dot, .live-chip .dot, .pill[data-state="warn"] .dot { animation: none; }
+.pill[data-state="on"] .dot, .live-chip .dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--low) 22%, transparent), 0 0 8px var(--low); }
+.pill[data-state="warn"] .dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--mid) 22%, transparent), 0 0 8px var(--mid); }
+body[data-phase="stopped"] .live-chip .dot { box-shadow: none; }
+
+/* likewise no looping decoration during a session: the halo holds still, and in the deepfake
+   state only the score card pulses (the red vignette stays on, steady) */
+body:not([data-phase="landing"]) .halo { animation: none; }
+body[data-verdict="deepfake"] .vignette { animation: none; opacity: .85; }
+
+/* deepfake alert: pulse the opacity of a glow layer, not the card's box-shadow */
+body[data-verdict="deepfake"] .score-card { animation: none; border-color: color-mix(in srgb, var(--high) 60%, var(--edge)); }
+.score-card::after {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none; opacity: 0;
+  border: 1px solid var(--high); box-shadow: inset 0 0 70px -12px var(--high);   /* inner glow: the card clips overflow */
+}
+/* stepped: 4 distinct frames per cycle instead of 60 — the alert still pulses, at ~no rendering cost */
+body[data-verdict="deepfake"] .score-card::after { animation: glow-pulse 1.6s steps(4) infinite; }
+@keyframes glow-pulse { 50% { opacity: 1; } }
+
+/* gauge halo: no filter blur (the gradient is already soft) */
+.halo { filter: none; background: radial-gradient(circle, color-mix(in srgb, var(--v) 26%, transparent), color-mix(in srgb, var(--v) 8%, transparent) 45%, transparent 70%); }
+
+/* scan line: move with transform instead of `top` (no layout per frame) */
+.scanline { top: 0; transform: translateY(-100%); }
+.stage[data-face="searching"] .scanline { animation: sweep-y 2.6s linear infinite; }
+@keyframes sweep-y { to { transform: translateY(333%); } }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
   .reveal { opacity: 1; transform: none; filter: none; }

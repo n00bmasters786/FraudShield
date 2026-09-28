@@ -103,8 +103,12 @@ KEEP_S = 30.0            # history kept in memory
 GAP_S = 1.5              # face missing this long = a new tracking segment
 MIN_FACE_PX = 36         # ignore faces smaller than this on screen (thumbnails, avatars)
 SCAN_EVERY_S = 0.35      # full-screen search while no face is locked
-RESCAN_EVERY_S = 2.5     # full-screen check for a bigger face while tracking
-NEAR_EVERY_S = 1.0       # second-person check around the tracked face
+IDLE_SCAN_EVERY_S = 1.0  # ...slower once nothing has been on screen for IDLE_AFTER_S
+IDLE_AFTER_S = 10.0
+RESCAN_EVERY_S = 2.5     # full-screen check for a bigger face / a second person while tracking
+SLOW_EVERY_S = 2.0       # 3-D parallax, pulse and texture checks are refreshed at this cadence
+CROP_PAD = 1.25          # region streamed while tracking = Face Mesh crop × this (covers neck + detector margin)
+PARALLAX_PAIRS = 600     # frame pairs sampled for the 3-D test
 LOST_AFTER_S = 0.8       # mesh lost this long -> drop the lock and search again
 TEX_EVERY_S = 0.5        # texture checks (blend seam, moiré) cadence
 MESH_INPUT = 480         # crop fed to Face Mesh is resized to this side
@@ -343,6 +347,13 @@ class FrameRec:
     blend: Optional[float] = None
     moire: Optional[float] = None
     glare: Optional[float] = None
+    # computed once per frame at ingest, instead of for the whole window every second
+    ear_r: float = float("nan")
+    ear_l: float = float("nan")
+    brow: float = float("nan")
+    yaw: float = float("nan")
+    pitch: float = float("nan")
+    jit: float = float("nan")                # landmark residual vs. the previous frame, % of IOD
 
 
 # --------------------------------------------------------------------------
@@ -377,6 +388,7 @@ class FaceStream:
         self.backend = f"{_Mesh.name if self._mesh else 'no landmark model'} · {self._finder.name}"
         self.frame_size: Optional[Tuple[int, int]] = None
         self.faces_on_screen = 0
+        self._slow = None                          # cached slow-check results (see analyze_window)
         self.events: List[Tuple[str, str]] = []   # (kind, message) drained by the session
         self._reset_tracking()
 
@@ -385,7 +397,9 @@ class FaceStream:
         self._crop = None
         self._lost_since = None
         self._last_scan = -1e9
-        self._last_near = -1e9
+        self._last_seen = None                      # last time any face was found (search back-off)
+        self._prev_lm = None
+        self._cam = None                            # running virtual camera (focal, cx, cy) for head pose
         self._last_tex = -1e9
         self._last_model_t = -1e9
         self._n_near = 1
@@ -465,68 +479,87 @@ class FaceStream:
         x1, y1 = int(min(W, cx + side / 2)), int(min(H, cy + side / 2))
         self._crop = (x0, y0, x1, y1)
 
-    def process(self, t: float, frame: np.ndarray) -> dict:
-        """Ingest one BGR screen frame captured at time t (seconds). Returns overlay info."""
-        H, W = frame.shape[:2]
+    def process(self, t: float, frame: np.ndarray, origin=(0, 0), full_size=None) -> dict:
+        """Ingest one BGR frame captured at time t (seconds). Returns overlay info + what to send next.
+
+        The browser sends the whole screen only while searching (and every RESCAN_EVERY_S while
+        tracking); otherwise just the region around the customer's face, at native resolution.
+        `origin` is that region's top-left corner in full-screen pixels and `full_size` = (W, H)
+        of the full screen. All tracking state is kept in full-screen coordinates.
+        """
+        ox, oy = int(origin[0]), int(origin[1])
+        fh, fw = frame.shape[:2]
+        W, H = full_size if full_size else (fw, fh)
+        is_full = ox == 0 and oy == 0 and fw >= W - 1 and fh >= H - 1
         self.frame_size = (H, W)
         roi_px = self._roi_px(W, H)
 
-        # ---- 1. locate the customer's face
-        if self._target is None and t - self._last_scan >= SCAN_EVERY_S or \
-                self._target is not None and t - self._last_scan >= RESCAN_EVERY_S:
-            self._last_scan = t
-            faces = [b for b in self._finder.find(frame, roi_px) if min(b[2], b[3]) >= MIN_FACE_PX]
-            self.faces_on_screen = len(faces)
-            biggest = max(faces, key=_area, default=None)
-            if self._target is None:
+        # ---- 1. locate the customer's face (full frames only)
+        if is_full:
+            idle = self._last_seen is None or t - self._last_seen > IDLE_AFTER_S
+            scan_every = RESCAN_EVERY_S if self._target is not None else (IDLE_SCAN_EVERY_S if idle else SCAN_EVERY_S)
+            if t - self._last_scan >= scan_every:
+                self._last_scan = t
+                faces = [b for b in self._finder.find(frame, roi_px) if min(b[2], b[3]) >= MIN_FACE_PX]
+                self.faces_on_screen = len(faces)
+                biggest = max(faces, key=_area, default=None)
                 if biggest is not None:
-                    self._acquire(biggest, "acquire")
-            elif biggest is not None and _area(biggest) > 2.5 * _area(self._target) \
-                    and max(_iou(biggest, self._target)) < 0.1:
-                self._acquire(biggest, "switch")
-
-        # ---- 2. is a second person sitting next to the customer?
-        if self._target is not None and t - self._last_near >= NEAR_EVERY_S:
-            self._last_near = t
-            nb = _expand(self._target, 3.0, 2.0, W, H)
-            region = (int(nb[0]), int(nb[1]), int(nb[0] + nb[2]), int(nb[1] + nb[3]))
-            near = [b for b in self._finder.find(frame, region, tiles=False)
-                    if min(b[2], b[3]) >= 0.45 * min(self._target[2], self._target[3])]
-            self._n_near = max(1, len(near))
+                    self._last_seen = t
+                if self._target is None:
+                    if biggest is not None:
+                        self._acquire(biggest, "acquire")
+                else:
+                    if biggest is not None and _area(biggest) > 2.5 * _area(self._target) \
+                            and max(_iou(biggest, self._target)) < 0.1:
+                        self._acquire(biggest, "switch")
+                    # ---- 2. is a second person sitting next to the customer?
+                    nb = _expand(self._target, 3.0, 2.0)
+                    self._n_near = max(1, sum(1 for b in faces if _inside(_center(b), nb)
+                                              and min(b[2], b[3]) >= 0.45 * min(self._target[2], self._target[3])))
 
         # ---- 3. landmarks on a native-resolution crop
         lm = None
+        stale = False                                 # this frame doesn't cover the face region
         if self._target is not None and self._mesh is not None:
             self._update_crop(W, H)
             x0, y0, x1, y1 = self._crop
-            crop = frame[y0:y1, x0:x1]
-            s = MESH_INPUT / max(x1 - x0, y1 - y0)
-            small = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
-            nl = self._mesh(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
-            if nl is not None:
-                pts = np.empty_like(nl)
-                pts[:, 0] = x0 + nl[:, 0] * (x1 - x0)
-                pts[:, 1] = y0 + nl[:, 1] * (y1 - y0)
-                box = _bbox(pts[:468])
-                if _inside(_center(box), _expand(self._target, 1.6)) and min(box[2], box[3]) >= MIN_FACE_PX * 0.8:
-                    lm = pts
-                    self._target = box
-                    self._lost_since = None
-            if lm is None:
+            lx0, ly0 = max(0, x0 - ox), max(0, y0 - oy)
+            lx1, ly1 = min(fw, x1 - ox), min(fh, y1 - oy)
+            if (lx1 - lx0) * (ly1 - ly0) < 0.6 * (x1 - x0) * (y1 - y0):
+                stale = True
+            else:
+                crop = frame[ly0:ly1, lx0:lx1]
+                s = MESH_INPUT / max(lx1 - lx0, ly1 - ly0)
+                small = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
+                nl = self._mesh(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+                if nl is not None:
+                    pts = np.empty_like(nl)
+                    pts[:, 0] = ox + lx0 + nl[:, 0] * (lx1 - lx0)
+                    pts[:, 1] = oy + ly0 + nl[:, 1] * (ly1 - ly0)
+                    box = _bbox(pts[:468])
+                    if _inside(_center(box), _expand(self._target, 1.6)) and min(box[2], box[3]) >= MIN_FACE_PX * 0.8:
+                        lm = pts
+                        self._target = box
+                        self._lost_since = None
+                        self._last_seen = t
+            if lm is None and not stale:
                 if self._lost_since is None:
                     self._lost_since = t
                 elif t - self._lost_since > LOST_AFTER_S:
                     self._reset_tracking()
                     self._last_scan = t - SCAN_EVERY_S       # search again right away
+                    self._last_seen = t
                     self.events.append(("lost", "Customer face lost from the screen"))
 
-        # ---- 4. measurements
+        # ---- 4. measurements (pixel work in this frame's local coordinates)
         rec = FrameRec(t=t, lm=lm, n_faces=self._n_near if lm is not None else 0)
         if lm is not None:
+            local = lm - np.array([ox, oy], np.float32)
             iod = float(np.linalg.norm(lm[IOD_PAIR[0]] - lm[IOD_PAIR[1]]))
             rec.iod = iod
             rec.mouth = float(np.linalg.norm(lm[MOUTH[0]] - lm[MOUTH[1]]) / (iod + 1e-6))
-            rois = _roi_circles(lm, iod)
+            self._geometry(lm, iod, rec)
+            rois = _roi_circles(local, iod)
             for k in ("forehead", "cheek_r", "cheek_l"):
                 px = _circle_patch(frame, rois[k])
                 if px is not None and len(px) >= 10:
@@ -534,17 +567,20 @@ class FaceStream:
                     rec.rgb[k] = (float(r), float(g), float(b))
             if t - self._last_tex >= TEX_EVERY_S:
                 self._last_tex = t
-                self._texture(frame, lm, rois, rec)
-            self._score_face(t, frame, lm)
+                self._texture(frame, local, rois, rec)
+            self._score_face(t, frame, local)
+        self._prev_lm = lm
 
-        with self.lock:
-            self.records.append(rec)
-            while self.records and self.records[0].t < t - self.keep_s:
-                self.records.popleft()
+        if not stale:
+            with self.lock:
+                self.records.append(rec)
+                while self.records and self.records[0].t < t - self.keep_s:
+                    self.records.popleft()
 
-        # ---- 5. overlay for the officer's preview
+        # ---- 5. overlay for the officer's preview + what the browser should send next
         ov = {"target": None, "contours": None, "dots": None, "crop": None,
-              "faces_on_screen": self.faces_on_screen, "tracking": lm is not None}
+              "faces_on_screen": self.faces_on_screen, "tracking": lm is not None,
+              "want": self._want(t, W, H)}
         if self._target is not None:
             ov["target"] = _norm_box(self._target, W, H)
         if self._crop is not None:
@@ -556,6 +592,29 @@ class FaceStream:
             ov["dots"] = np.round(n[MESH_DOTS], 4).ravel().tolist()
             ov["iod"] = round(rec.iod, 1)
         return ov
+
+    def _want(self, t, W, H):
+        """Tell the browser what to capture next: the whole screen (searching, periodic re-scan)
+        or just the face region, and how often."""
+        if self._target is None or self._crop is None:
+            idle = self._last_seen is None or t - self._last_seen > IDLE_AFTER_S
+            return {"full": True, "fps": 1.0 / (IDLE_SCAN_EVERY_S if idle else SCAN_EVERY_S)}
+        x0, y0, x1, y1 = self._crop
+        r = _expand((x0, y0, x1 - x0, y1 - y0), CROP_PAD, CROP_PAD, W, H)
+        return {"full": t - self._last_scan >= RESCAN_EVERY_S - 0.07, "fps": 15,
+                "rect": [round(r[0] / W, 4), round(r[1] / H, 4), round(r[2] / W, 4), round(r[3] / H, 4)]}
+
+    def _geometry(self, lm, iod, rec):
+        """Per-frame eye openness, brow height, head pose and landmark jitter (cached on the record)."""
+        rec.ear_r, rec.ear_l = _ear(lm, EYE_R), _ear(lm, EYE_L)
+        rec.brow = float((np.linalg.norm(lm[BROWS[0]] - lm[33]) + np.linalg.norm(lm[BROWS[1]] - lm[263])) / (2 * iod))
+        cam = (6.0 * iod, float(lm[1][0]), float(lm[1][1]))
+        # slowly-moving virtual camera ≈ the window-median camera the analysis used to rebuild every second
+        self._cam = cam if self._cam is None else tuple(0.95 * a + 0.05 * b for a, b in zip(self._cam, cam))
+        rec.yaw, rec.pitch, _ = head_pose(lm, self._cam)
+        if self._prev_lm is not None:
+            r, _ = _similarity_residual(self._prev_lm[RIGID_IDX], lm[RIGID_IDX])
+            rec.jit = 100.0 * r / iod if np.isfinite(r) else float("nan")
 
     def _score_face(self, t, frame, lm):
         """Hand a native-resolution face crop to the trained detector."""
@@ -673,40 +732,42 @@ class FaceStream:
         med_iod = float(np.nanmedian(iods))
         size_rel = clip01((med_iod - 22.0) / 38.0)    # small faces on screen = noisier landmarks
 
+        # per-frame quantities were computed once at ingest
+        arr = lambda k: np.array([getattr(r, k) for r in seg], float)
+        ear_r, ear_l = arr("ear_r"), arr("ear_l")
+        pre = {"yaw": arr("yaw"), "pitch": arr("pitch"), "jit": arr("jit"), "mouth": arr("mouth"),
+               "brow": arr("brow"), "ear": (ear_r + ear_l) / 2}
+
         # 1. blinks
-        ear_r = np.array([(_ear(l, EYE_R) if l is not None else np.nan) for l in lms])
-        ear_l = np.array([(_ear(l, EYE_L) if l is not None else np.nan) for l in lms])
         s_blink, b = analyze_blinks(ear_r, ear_l, fps)
         s_blink.reliability *= size_rel
         signals.append(s_blink)
 
-        # 2-4. geometry
-        nose = np.array([l[1] for l in lms if l is not None])
-        cam = (6.0 * med_iod, float(np.median(nose[:, 0])), float(np.median(nose[:, 1])))
-        geo_sigs, g = analyze_geometry(lms, iods, fps, cam)
-        for sg in geo_sigs:
-            sg.reliability *= size_rel
-        signals.extend(geo_sigs)
-
-        # 5. pulse — resample onto a uniform clock first
-        fps_u = float(np.clip(fps, 8.0, 30.0))
-        tg = np.arange(ts[0], ts[-1], 1.0 / fps_u)
-        rgb_u = {}
-        for k in ("forehead", "cheek_r", "cheek_l"):
-            a = np.array([r.rgb.get(k, (np.nan,) * 3) for r in seg], float)
-            ok = np.all(np.isfinite(a), 1)
-            if ok.mean() >= 0.8 and ok.sum() >= 3 * fps:
-                rgb_u[k] = np.stack([np.interp(tg, ts[ok], a[ok, c]) for c in range(3)], 1)
-        s_pulse, p = analyze_pulse(rgb_u, fps_u, g.get("head_motion", 0.0) or 0.0)
-        s_pulse.reliability *= size_rel
-        signals.append(s_pulse)
-
-        # 6-7. texture
-        s_blend, bl = analyze_blend([r.blend for r in seg if r.blend is not None])
-        signals.append(s_blend)
-        s_rec, rc = analyze_recapture([r.moire for r in seg if r.moire is not None],
-                                      [r.glare for r in seg if r.glare is not None])
-        signals.append(s_rec)
+        # 2-4 geometry, 5 pulse, 6-7 texture: the slower checks are refreshed every SLOW_EVERY_S
+        # (they summarise 20 s of video, so a 1 s refresh added nothing but CPU)
+        slow = self._slow
+        if slow is None or slow["start"] != seg[0].t or t_end - slow["t"] >= SLOW_EVERY_S:
+            geo_sigs, g = analyze_geometry(lms, iods, fps, pre)
+            fps_u = float(np.clip(fps, 8.0, 30.0))
+            tg = np.arange(ts[0], ts[-1], 1.0 / fps_u)
+            rgb_u = {}
+            for k in ("forehead", "cheek_r", "cheek_l"):
+                a = np.array([r.rgb.get(k, (np.nan,) * 3) for r in seg], float)
+                ok = np.all(np.isfinite(a), 1)
+                if ok.mean() >= 0.8 and ok.sum() >= 3 * fps:
+                    rgb_u[k] = np.stack([np.interp(tg, ts[ok], a[ok, c]) for c in range(3)], 1)
+            s_pulse, p = analyze_pulse(rgb_u, fps_u, g.get("head_motion", 0.0) or 0.0)
+            s_blend, bl = analyze_blend([r.blend for r in seg if r.blend is not None])
+            s_rec, rc = analyze_recapture([r.moire for r in seg if r.moire is not None],
+                                          [r.glare for r in seg if r.glare is not None])
+            slow = self._slow = {"t": t_end, "start": seg[0].t, "geo": geo_sigs, "g": g, "pulse": s_pulse,
+                                 "p": p, "fps_u": fps_u, "blend": s_blend, "bl": bl, "rec": s_rec, "rc": rc}
+        g, p, fps_u, bl, rc = slow["g"], slow["p"], slow["fps_u"], slow["bl"], slow["rc"]
+        for sg in [*slow["geo"], slow["pulse"], slow["blend"], slow["rec"]]:
+            sg = Signal(**{k: v for k, v in sg.__dict__.items()})      # fresh copy: weights are adjusted below
+            if sg.key in ("dynamics", "parallax", "jitter", "pulse"):
+                sg.reliability *= size_rel
+            signals.append(sg)
 
         # 8. trained deepfake detector
         with self.lock:
@@ -723,7 +784,7 @@ class FaceStream:
         score, conf, reasons, groups = group_score(signals)
 
         # compact traces for the dashboard (time relative to now, seconds)
-        ear = (ear_r + ear_l) / 2
+        ear = pre["ear"]
         k = max(1, n // 240)
         rel = np.round(ts - t_end, 2)
         det = {
@@ -851,32 +912,27 @@ def head_pose(lm, cam):
     return (yaw, pitch, roll)
 
 
-def analyze_geometry(lms, iods, fps, cam):
-    """Expression dynamics, 3-D parallax and landmark jitter from landmark tracks."""
+def analyze_geometry(lms, iods, fps, pre):
+    """Expression dynamics, 3-D parallax and landmark jitter from landmark tracks.
+
+    pre: per-frame arrays computed at ingest — yaw, pitch (degrees), jit (landmark residual vs. the
+    previous frame, % of IOD), mouth, brow, ear — NaN where no face was tracked.
+    """
     idx = [i for i, l in enumerate(lms) if l is not None]
-    out = {"yaw": [np.nan] * len(lms), "pitch": [np.nan] * len(lms), "roll": [np.nan] * len(lms)}
+    out = {}
     na = lambda k, lab, why: Signal(k, lab, "—", 0.5, 1.0, 0.0, why)
     if len(idx) < max(10, fps):
         why = "Not enough frames with a tracked face"
         return [na("dynamics", "Expression dynamics", why), na("parallax", "3-D structure", why),
                 na("jitter", "Landmark stability", why)], out
-
-    for i in idx:
-        y, p, r = head_pose(lms[i], cam)
-        out["yaw"][i], out["pitch"][i], out["roll"][i] = y, p, r
-    yaw = np.array(out["yaw"], float)
-    pitch = np.array(out["pitch"], float)
+    yaw, pitch = pre["yaw"], pre["pitch"]
 
     # ---- landmark jitter (non-rigid residual between consecutive frames)
-    res, rigid_motion = [], []
-    for a, b in zip(idx[:-1], idx[1:]):
-        if b - a != 1:
-            continue
-        r, M = _similarity_residual(lms[a][RIGID_IDX], lms[b][RIGID_IDX])
-        if np.isfinite(r):
-            res.append(100.0 * r / iods[b])
-            rigid_motion.append(100.0 * np.linalg.norm(M[:, 2]) / iods[b] if M is not None else 0)
-    res = np.array(res) if res else np.array([np.nan])
+    present = np.array([l is not None for l in lms])
+    consecutive = present & np.concatenate([[False], present[:-1]])
+    res = pre["jit"][consecutive]
+    res = res[np.isfinite(res)]
+    res = res if len(res) else np.array([np.nan])
     jit = float(np.nanmedian(res))
     spikes = float(np.mean(res > max(3 * jit, 2.5))) if np.isfinite(jit) else 0.0
     out.update(jitter=jit, spikes=spikes)
@@ -893,10 +949,7 @@ def analyze_geometry(lms, iods, fps, cam):
     # ---- expression dynamics (non-rigid facial motion)
     L = np.stack([lms[i] for i in idx])
     I = np.array([iods[i] for i in idx])
-    mouth = np.linalg.norm(L[:, MOUTH[0]] - L[:, MOUTH[1]], axis=1) / I
-    brow = (np.linalg.norm(L[:, BROWS[0]] - L[:, 33], axis=1) +
-            np.linalg.norm(L[:, BROWS[1]] - L[:, 263], axis=1)) / (2 * I)
-    ear = np.array([(_ear(l, EYE_R) + _ear(l, EYE_L)) / 2 for l in L])
+    mouth, brow, ear = pre["mouth"][idx], pre["brow"][idx], pre["ear"][idx]
     expr = float(100 * (np.std(mouth) + np.std(brow)) + 10 * np.std(ear))
     head_move = float(np.nanstd(yaw) + np.nanstd(pitch))
     out.update(expression=expr, head_motion=head_move)
@@ -917,8 +970,8 @@ def analyze_geometry(lms, iods, fps, cam):
     big, small = [], []
     ang = np.stack([yaw[idx], pitch[idx]], 1)
     cand = [(a, b) for a in range(0, len(idx), 2) for b in range(a + 2, len(idx), 3)]
-    if len(cand) > 1200:
-        cand = [cand[k] for k in rng.choice(len(cand), 1200, replace=False)]
+    if len(cand) > PARALLAX_PAIRS:
+        cand = [cand[k] for k in rng.choice(len(cand), PARALLAX_PAIRS, replace=False)]
     for a, b in cand:
         d = np.nanmax(np.abs(ang[a] - ang[b]))
         if not np.isfinite(d):
@@ -958,19 +1011,24 @@ def analyze_geometry(lms, iods, fps, cam):
 
 
 def _pos(rgb, fps):
-    """Plane-Orthogonal-to-Skin rPPG (Wang et al., 2017)."""
+    """Plane-Orthogonal-to-Skin rPPG (Wang et al., 2017), all sliding windows at once."""
+    rgb = np.asarray(rgb, float)
     n = len(rgb)
     l = max(4, int(round(1.6 * fps)))
     H = np.zeros(n)
-    P = np.array([[0, 1, -1], [-2, 1, 1]], float)
-    for s in range(0, n - l + 1):
-        C = rgb[s:s + l]
-        mu = C.mean(0)
-        if np.any(mu <= 0):
-            continue
-        S = P @ (C / mu).T
-        h = S[0] + (S[0].std() / (S[1].std() + 1e-9)) * S[1]
-        H[s:s + l] += h - h.mean()
+    if n < l:
+        return H
+    C = np.lib.stride_tricks.sliding_window_view(rgb, l, axis=0)       # (m, 3, l)
+    mu = C.mean(2, keepdims=True)
+    ok = np.all(mu[:, :, 0] > 0, 1)
+    Cn = C / np.where(mu > 0, mu, 1.0)
+    s0 = Cn[:, 1] - Cn[:, 2]                                             # P = [[0, 1, -1], [-2, 1, 1]]
+    s1 = -2 * Cn[:, 0] + Cn[:, 1] + Cn[:, 2]
+    h = s0 + (s0.std(1) / (s1.std(1) + 1e-9))[:, None] * s1
+    h = (h - h.mean(1, keepdims=True)) * ok[:, None]
+    m = len(h)
+    for j in range(l):                                                   # overlap-add
+        H[j:j + m] += h[:, j]
     return H
 
 

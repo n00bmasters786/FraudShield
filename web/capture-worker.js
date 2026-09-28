@@ -3,6 +3,11 @@
 // system-audio PCM. It runs off the main thread on purpose: browsers throttle timers in
 // hidden tabs, and the officer will usually have the video call — not this dashboard —
 // in front. Frames arrive through a MediaStreamTrackProcessor stream, which isn't throttled.
+//
+// To stay light, it sends what the engine asks for in each ack (`want`): the whole screen only
+// while searching for the customer (a few times a second) and every ~2.5 s while tracking;
+// otherwise just the region around the face, cropped at native resolution. Encoding, sending
+// and decoding a ~400 px crop costs a fraction of a full 1080p frame, with the same face pixels.
 
 const KIND_FRAME = 1;
 const KIND_AUDIO = 2;
@@ -10,9 +15,11 @@ const KIND_AUDIO = 2;
 let ws = null;
 let wsUrl = null;
 let running = false;
-let fps = 15;
+let fps = 15;                     // upper bound; the engine's `want.fps` can ask for less
 let maxWidth = 1920;
-let quality = 0.82;
+const FULL_QUALITY = 0.8;         // whole-screen frames (face search only)
+const CROP_QUALITY = 0.82;        // face region: same quality the detectors were calibrated on (full frames were 0.82)
+let want = { full: true, fps: 3, rect: null };
 let inFlight = false;
 let sentAt = -1e9;
 let canvas = null;
@@ -23,13 +30,15 @@ const meter = { frames: 0, bytes: 0, audioBytes: 0, since: performance.now() };
 
 const epochNow = () => performance.timeOrigin + performance.now();
 
-function packet(kind, extra, ts, body) {
-  const out = new Uint8Array(16 + body.byteLength);
+function packet(kind, extra, ts, body, region = null) {
+  const pre = region ? 8 : 0;
+  const out = new Uint8Array(16 + pre + body.byteLength);
   const dv = new DataView(out.buffer);
   dv.setUint8(0, kind);
-  dv.setUint32(4, extra >>> 0, true);
+  dv.setUint32(4, (extra | (region ? 1 : 0)) >>> 0, true);
   dv.setFloat64(8, ts, true);
-  out.set(new Uint8Array(body), 16);
+  if (region) region.forEach((v, i) => dv.setUint16(16 + 2 * i, v, true));   // x, y, screen W, screen H
+  out.set(new Uint8Array(body), 16 + pre);
   return out.buffer;
 }
 
@@ -44,6 +53,7 @@ function connect() {
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     inFlight = false;
+    want = { full: true, fps: 3, rect: null };   // a fresh engine session starts by searching
     postMessage({ type: 'conn', state: 'open' });
     if (lastConfig) sendJson(lastConfig);
   };
@@ -54,31 +64,50 @@ function connect() {
   ws.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
-    if (msg.type === 'ack') inFlight = false;
+    if (msg.type === 'ack') {
+      inFlight = false;
+      if (msg.want) want = msg.want;
+    }
     postMessage(msg);
   };
 }
 
 function readyForFrame(t) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  if (t - sentAt < 1000 / fps) return false;
+  // 15 % tolerance: capture delivers frames at ~the same rate, and a frame arriving a hair early
+  // must not be skipped (that would halve the analysed frame rate)
+  if (t - sentAt < 850 / Math.min(fps, want.fps || fps)) return false;
   // one frame in flight at a time; give up waiting for a lost ack after 1.5 s
   return !(inFlight && t - sentAt < 1500);
 }
 
 async function encodeAndSend(source, w0, h0, ts) {
+  // engine coordinates = the screen scaled to at most maxWidth
   const s = Math.min(1, maxWidth / w0);
-  const w = Math.round(w0 * s);
-  const h = Math.round(h0 * s);
+  const W = Math.round(w0 * s);
+  const H = Math.round(h0 * s);
+  let region = null;
+  let w = W;
+  let h = H;
+  if (!want.full && want.rect) {
+    const [rx, ry, rw, rh] = want.rect;
+    const x = Math.max(0, Math.round(rx * W));
+    const y = Math.max(0, Math.round(ry * H));
+    w = Math.min(W - x, Math.round(rw * W));
+    h = Math.min(H - y, Math.round(rh * H));
+    if (w >= 32 && h >= 32) region = [x, y, W, H];
+    else { w = W; h = H; }
+  }
   if (!canvas || canvas.width !== w || canvas.height !== h) {
     canvas = new OffscreenCanvas(w, h);
     ctx = canvas.getContext('2d', { alpha: false });
   }
-  ctx.drawImage(source, 0, 0, w, h);
-  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+  if (region) ctx.drawImage(source, region[0] / s, region[1] / s, w / s, h / s, 0, 0, w, h);
+  else ctx.drawImage(source, 0, 0, w, h);
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: region ? CROP_QUALITY : FULL_QUALITY });
   const buf = await blob.arrayBuffer();
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(packet(KIND_FRAME, 0, ts, buf));
+    ws.send(packet(KIND_FRAME, 0, ts, buf, region));
     meter.frames += 1;
     meter.bytes += buf.byteLength;
   } else {

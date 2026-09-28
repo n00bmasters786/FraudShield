@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 import cv2
 import numpy as np
 
-from . import MODELS_DIR, torch_device
+from . import MODELS_DIR, torch_device, wait_gpu
 
 log = logging.getLogger("fraudshield.face_model")
 
@@ -139,14 +139,16 @@ class FaceDeepfakeClassifier:
 
         self.torch = torch
         self.device = torch_device()
-        if self.device == "cpu":
-            torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
+        # two intra-op threads: enough for one face crop at a time, without starving the video call
+        torch.set_num_threads(2)
         names = names or [n.strip() for n in os.environ.get("FRAUDSHIELD_FACE_MODELS", DEFAULT_SET).split(",") if n.strip()]
         self.models: Dict[str, "torch.nn.Module"] = {}
         self.sizes: Dict[str, int] = {}
         for name in names:
             repo, variant = CHECKPOINTS[name]
-            path = hf_hub_download(repo, "model.safetensors", local_dir=MODELS_DIR / repo.split("/")[1])
+            local = MODELS_DIR / repo.split("/")[1] / "model.safetensors"
+            # use the downloaded copy directly — no network round-trip on every start
+            path = local if local.exists() else hf_hub_download(repo, "model.safetensors", local_dir=local.parent)
             state = {k.removeprefix("model."): v for k, v in load_file(path).items()}
             net = MultiScaleEffGCViT(**VARIANTS[variant])
             missing, unexpected = net.load_state_dict(state, strict=False)
@@ -156,21 +158,59 @@ class FaceDeepfakeClassifier:
             self.sizes[name] = VARIANTS[variant]["img_size"][0]
         self._lock = threading.Lock()
         self.names = list(self.models)
-        self.name = f"MS-EffGCViT ensemble ({' + '.join(self.names)}) · {self.device}"
+        self._graph = None
         self.predict([np.zeros((64, 64, 3), np.uint8)])       # compile kernels once
+        if self.device == "cuda" and os.environ.get("FRAUDSHIELD_CUDA_GRAPHS", "1") != "0":
+            try:
+                self._build_graph()
+            except Exception as e:                           # fall back to eager launches
+                self._graph = None
+                log.warning("CUDA graph capture failed, using eager mode: %s", e)
+        self.name = (f"MS-EffGCViT ensemble ({' + '.join(self.names)}) · {self.device}"
+                     + (" · CUDA graph" if self._graph is not None else ""))
+
+    def _forward(self, batches):
+        torch = self.torch
+        return torch.stack([torch.sigmoid(net(batches[self.sizes[name]])).float()[:, 0]
+                            for name, net in self.models.items()], 1)
+
+    def _build_graph(self):
+        """Record the single-crop forward pass of every checkpoint as one CUDA graph.
+
+        The ensemble is ~600 small kernels per crop; launching them one by one from Python
+        cost more CPU than the inference itself. A graph replays all of them with one call.
+        """
+        torch = self.torch
+        self._static_in = {sz: torch.zeros(1, 3, sz, sz, device=self.device) for sz in set(self.sizes.values())}
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.no_grad(), torch.cuda.stream(side):
+            for _ in range(3):                               # warm-up (cuDNN autotune, allocator)
+                self._forward(self._static_in)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), torch.cuda.graph(graph):
+            self._static_out = self._forward(self._static_in)
+        self._graph = graph
 
     def predict(self, crops_rgb: List[np.ndarray]) -> np.ndarray:
         """(n_crops, n_models) array of P(fake)."""
         if not crops_rgb:
             return np.zeros((0, len(self.models)), np.float32)
         torch = self.torch
-        batches = {sz: torch.from_numpy(np.stack([preprocess(c, sz) for c in crops_rgb])).to(self.device)
-                   for sz in set(self.sizes.values())}
-        out = []
-        with self._lock, torch.inference_mode():
-            for name, net in self.models.items():
-                out.append(torch.sigmoid(net(batches[self.sizes[name]])).float().cpu().numpy()[:, 0])
-        return np.stack(out, 1)
+        with self._lock:
+            if self._graph is not None and len(crops_rgb) == 1:
+                for sz, buf in self._static_in.items():
+                    buf.copy_(torch.from_numpy(preprocess(crops_rgb[0], sz)[None]))
+                self._graph.replay()
+                wait_gpu(torch, self.device)
+                return self._static_out.cpu().numpy()
+            batches = {sz: torch.from_numpy(np.stack([preprocess(c, sz) for c in crops_rgb])).to(self.device)
+                       for sz in set(self.sizes.values())}
+            with torch.inference_mode():
+                out = self._forward(batches)
+                wait_gpu(torch, self.device)
+                return out.cpu().numpy()
 
 
 class AsyncFaceScorer:

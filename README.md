@@ -204,6 +204,46 @@ venv\Scripts\python app.py
 Each checkpoint set keeps its own calibration entry, and an uncalibrated set
 falls back to a plain average.
 
+## Performance
+
+FraudShield has to run next to the video call without slowing it down. The
+figures below were measured with a live session (dashboard visible, a deepfake
+clip playing in the shared call tab) and are % of one CPU core:
+
+| | Before | Now |
+|---|---|---|
+| Chrome (dashboard + capture) | ~252 % | ~97 % |
+| Python engine | ~99 % | ~30 % |
+| Frames analysed per second | 11 | 15 |
+
+Detection results are unchanged (same verdicts and fake scores). How it stays
+light:
+
+- **Face-region streaming.** The browser sends the whole screen only while
+  searching for the customer (≤ 3 fps, 1 fps when nothing is on screen) and
+  every 2.5 s to re-check the screen. Otherwise it sends just the region around
+  the face, at native resolution, so encoding and decoding cost a fraction of a
+  full 1080p frame.
+- **Work done once.** Eye openness, head pose and landmark jitter are computed
+  when each frame arrives, not recomputed over the 20 s window every second.
+  The slower checks (3-D depth, pulse, texture) refresh every 2 s and voice
+  every 2 s; the pulse algorithm is vectorised.
+- **GPU without CPU spin.** The face detector replays as a single CUDA graph
+  (~6 ms CPU per face instead of ~490 ms of per-kernel launches), and GPU
+  results are awaited without busy-waiting.
+- **No thread storms.** Numeric libraries are capped at 2 threads, and OpenMP
+  workers wait passively (`OMP_WAIT_POLICY=PASSIVE`, `KMP_BLOCKTIME=0`);
+  their spin-waiting alone was costing ~70 % of a core.
+- **A dashboard that rests.** Screen capture is capped at 15 fps. Canvases
+  redraw only when their data changes (at most 15–30 fps), bars and rings
+  animate on the compositor, and nothing loops during a session. Any looping
+  animation makes the browser redraw the whole page at 60 fps. The glass keeps
+  its look with a static tint instead of a live blur.
+
+Heavy software running at the same time (DJ or streaming software, many
+browser tabs) competes for the same CPU and GPU. If the call still stutters,
+close those first.
+
 ## Privacy
 
 Frames and audio go only to the engine on `localhost`. They are analysed in

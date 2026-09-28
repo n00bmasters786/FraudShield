@@ -11,6 +11,17 @@ Run:
     venv\\Scripts\\python app.py            then open http://localhost:8000
 """
 
+import os
+
+# Keep the numeric libraries from grabbing every core: the engine's work is many small
+# per-frame operations, where 16 spinning threads only steal CPU from the video call.
+# OMP_WAIT_POLICY / KMP_BLOCKTIME stop OpenMP workers busy-waiting between those small
+# operations — on its own that spin cost ~70 % of a core. Must be set before numpy / torch load.
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "2")
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("KMP_BLOCKTIME", "0")
+
 import argparse
 import asyncio
 import json
@@ -20,6 +31,7 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import cv2
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +48,10 @@ ANALYSIS_PERIOD_S = 1.0
 # binary packets from the browser: <u8 kind, 3 pad, u32 extra, f64 epoch-ms> + payload
 HEADER = struct.Struct("<BxxxId")
 KIND_FRAME, KIND_AUDIO = 1, 2
+# frames with extra & 1 carry a region of the screen: <u16 x, u16 y, u16 screen W, u16 screen H>
+REGION = struct.Struct("<HHHH")
+
+cv2.setNumThreads(2)
 
 app = FastAPI(title="FraudShield Live")
 
@@ -75,10 +91,10 @@ async def session_socket(ws: WebSocket):
             if state:
                 await outbox.put(state)
 
-    async def handle_frame(ts, jpeg):
+    async def handle_frame(ts, jpeg, origin, full_size):
         nonlocal frame_busy
         try:
-            ack = await loop.run_in_executor(frame_pool, session.process_frame, ts, jpeg)
+            ack = await loop.run_in_executor(frame_pool, session.process_frame, ts, jpeg, origin, full_size)
             await outbox.put(ack)
         except Exception as e:  # keep the session alive on a bad frame
             await outbox.put({"type": "ack", "error": str(e)})
@@ -102,8 +118,12 @@ async def session_socket(ws: WebSocket):
                     if frame_busy:   # client normally waits for the ack; drop if it didn't
                         await outbox.put({"type": "ack", "dropped": True})
                         continue
+                    origin, full_size = (0, 0), None
+                    if extra & 1 and len(payload) > REGION.size:
+                        x, y, w, h = REGION.unpack_from(payload)
+                        origin, full_size, payload = (x, y), (w, h), payload[REGION.size:]
                     frame_busy = True
-                    asyncio.create_task(handle_frame(ts, payload))
+                    asyncio.create_task(handle_frame(ts, payload, origin, full_size))
                 elif kind == KIND_AUDIO:
                     session.add_audio(ts, extra, payload)
                 continue
